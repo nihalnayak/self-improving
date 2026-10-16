@@ -29,7 +29,6 @@ class RolloutBatch:
     completion_mask: torch.Tensor
     rewards: torch.Tensor
 
-
 def tokenize_rollouts(tok, prompts: List[str], completions: List[str], device: str,
                       max_prompt_len: int, max_total_len: int) -> RolloutBatch:
     """Encode (prompt, completion) pairs with left-padding and compute completion_mask."""

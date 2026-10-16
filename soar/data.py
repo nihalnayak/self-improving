@@ -6,6 +6,7 @@ from typing import List
 from datasets import load_dataset
 
 
+# TODO: double-check if this prompt format is the same one as lm-eval
 @dataclass
 class MCQ:
     """One multiple-choice question. `options` is a list of ~10 strings. `answer` is a letter A..J."""
