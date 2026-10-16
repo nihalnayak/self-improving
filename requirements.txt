@@ -1,0 +1,10 @@
+# Already satisfied by the mamba env `synthetic_persona` on this cluster.
+# Listed here only so the versions used during development are reproducible.
+torch==2.8.0
+transformers==4.57.1
+peft==0.15.2
+trl==0.19.1
+vllm==0.11.0
+datasets==5.0.1
+accelerate==1.14.0
+wandb==0.29.0
