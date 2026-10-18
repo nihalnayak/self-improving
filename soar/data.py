@@ -1,51 +1,57 @@
-"""Load MMLU-Pro, filter one subject, split into Q_eval (teacher reward) + Q_train (teacher exemplars)."""
+"""MathProblem dataclass + loader for fail@128 subsets produced by misc.build_fail128."""
 
-from dataclasses import dataclass
-from typing import List
+import json
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Tuple
 
-from datasets import load_dataset
 
-
-# TODO: double-check if this prompt format is the same one as lm-eval
 @dataclass
-class MCQ:
-    """One multiple-choice question. `options` is a list of ~10 strings. `answer` is a letter A..J."""
-    qid: int
-    question: str
-    options: List[str]
-    answer: str              # letter 'A'..'J'
-    answer_index: int        # 0..len(options)-1
+class MathProblem:
+    """One open-ended math problem with a gold answer string."""
+    qid: str              # unique id (sha1 of problem text, or original dataset id)
+    problem: str          # the question text
+    answer: str           # gold final answer (what should be inside \boxed{})
+    solution: str = ""    # optional full solution (from the source dataset)
+    level: str = ""       # optional difficulty label (e.g. "Level 5")
+    subject: str = ""     # optional topic (e.g. "Algebra")
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), ensure_ascii=False)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MathProblem":
+        return cls(
+            qid=str(d["qid"]),
+            problem=d["problem"],
+            answer=d["answer"],
+            solution=d.get("solution", ""),
+            level=d.get("level", ""),
+            subject=d.get("subject", ""),
+        )
 
 
-def _row_to_mcq(row) -> MCQ:
-    return MCQ(
-        qid=int(row["question_id"]),
-        question=row["question"],
-        options=list(row["options"]),
-        answer=row["answer"],
-        answer_index=int(row["answer_index"]),
-    )
+def _read_jsonl(path: Path) -> List[MathProblem]:
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(MathProblem.from_dict(json.loads(line)))
+    return out
 
 
-def load_mmlu_pro_split(subject: str, n_eval: int, seed: int) -> tuple[List[MCQ], List[MCQ]]:
-    """Return (Q_eval, Q_train_exemplars). Q_eval is the fixed set used to compute teacher reward.
-    Q_train is just a pool to draw few-shot exemplars from when prompting the teacher.
+def load_fail128_split(dir: str) -> Tuple[List[MathProblem], List[MathProblem]]:
+    """Return (train, test) MathProblem lists from a fail128 output directory."""
+    d = Path(dir)
+    train = _read_jsonl(d / "train.jsonl")
+    test = _read_jsonl(d / "test.jsonl")
+    return train, test
+
+
+def format_math_prompt(problem: MathProblem) -> str:
+    """Return the user-turn question string. The surrounding student prompt template is
+    applied by `soar.models.student_chat_prompt`.
     """
-    ds = load_dataset("TIGER-Lab/MMLU-Pro", split="test")
-    ds = ds.filter(lambda x: x["category"] == subject)
-    ds = ds.shuffle(seed=seed)
-    rows = [_row_to_mcq(r) for r in ds]
-    q_eval = rows[:n_eval]
-    q_train = rows[n_eval:]
-    return q_eval, q_train
-
-
-def format_mcq_prompt(q: MCQ) -> str:
-    """Format a multiple-choice question for the student to answer."""
-    letters = "ABCDEFGHIJ"
-    opt_lines = "\n".join(f"{letters[i]}. {o}" for i, o in enumerate(q.options))
-    return (
-        f"Question: {q.question}\n\n"
-        f"Options:\n{opt_lines}\n\n"
-        f"Think briefly, then answer with the final letter on a line like: Answer: X"
-    )
+    return problem.problem

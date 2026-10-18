@@ -1,6 +1,5 @@
-"""Load Qwen base + 2 LoRA adapters (teacher, student) and a vLLM engine on the same GPU."""
+"""Load base model + 2 LoRA adapters (teacher, student) and a vLLM engine on the same GPU."""
 
-import os
 from typing import Tuple
 
 import torch
@@ -8,6 +7,19 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from soar.config import SoarConfig
+
+
+# Exact student prompt from paper page 20, Appendix B.1. Used for fail@128 filtering,
+# inner-loop student training, and evaluation (same prompt in all three places).
+# `<QUESTION>` is substituted with the actual problem text via str.replace (avoids clashes
+# with the literal `{}` braces in `\boxed{}`).
+STUDENT_PROMPT_TEMPLATE = (
+    "A conversation between User and Assistant. The user asks a question, and the Assistant "
+    "solves it. The assistant first shows the complete reasoning process step by step, then "
+    "provides the final answer in \\boxed{} format: 'User: [question] Assistant: [detailed "
+    "reasoning] The final answer is: \\boxed{[answer]}.\n"
+    "User: <QUESTION> Assistant: "
+)
 
 
 def load_base_and_adapters(cfg: SoarConfig) -> Tuple[PeftModel, "AutoTokenizer"]:
@@ -60,9 +72,21 @@ def load_vllm_engine(cfg: SoarConfig):
 
 
 def chat_prompt(tok, user_msg: str, system_msg: str | None = None) -> str:
-    """Apply Qwen chat template and return a string prompt (for vLLM) with assistant start."""
+    """Apply the model's chat template and return a string prompt (for vLLM) with assistant
+    start. Used for the teacher turn.
+    """
     msgs = []
     if system_msg:
         msgs.append({"role": "system", "content": system_msg})
     msgs.append({"role": "user", "content": user_msg})
     return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+
+
+def student_chat_prompt(tok, question: str) -> str:
+    """Build the student input exactly as specified in SOAR paper page 20.
+
+    The paper's student prompt is a self-contained conversation template (not the model's
+    chat template), so we substitute `{question}` directly and feed the result as a plain
+    text prompt to vLLM. The trailing "Assistant: " primes the model to continue.
+    """
+    return STUDENT_PROMPT_TEMPLATE.replace("<QUESTION>", question)
