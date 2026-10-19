@@ -60,6 +60,17 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Commit Etiquette
+
+**One commit per logical change.**
+
+- One concern per commit: if the diff needs "and" to describe it, split it.
+- Unrelated cleanup, formatting fixes, and new features go in separate commits — don't piggyback them on the main change.
+- Conventional Commits format: `<type>(<scope>): <imperative summary>`. Types: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `chore`, `build`, `ci`.
+- Subject line ≤72 chars, imperative mood ("add", not "added"), no trailing period.
+- Body only when the *why* isn't obvious from the diff. Wrap at 72 chars.
+- No AI attribution trailers, no "generated with" lines.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
