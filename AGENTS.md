@@ -62,12 +62,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Commit Etiquette
 
-**One commit per logical change.**
+**One commit per logical change. Use `/caveman-commit` to write the message.**
 
 - One concern per commit: if the diff needs "and" to describe it, split it.
 - Unrelated cleanup, formatting fixes, and new features go in separate commits — don't piggyback them on the main change.
+- Always invoke the `caveman:caveman-commit` skill (`/caveman-commit`) to generate commit messages. Caveman-compressed messages stay readable and preserve intent without noise.
 - Conventional Commits format: `<type>(<scope>): <imperative summary>`. Types: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `chore`, `build`, `ci`.
-- Subject line ≤72 chars, imperative mood ("add", not "added"), no trailing period.
+- Subject line ≤50 chars, imperative mood ("add", not "added"), no trailing period.
 - Body only when the *why* isn't obvious from the diff. Wrap at 72 chars.
 - No AI attribution trailers, no "generated with" lines.
 
