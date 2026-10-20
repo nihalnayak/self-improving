@@ -25,7 +25,9 @@ from collections import Counter
 from pathlib import Path
 from typing import List, Optional
 
+import torch
 from datasets import load_dataset
+from tqdm import tqdm
 from vllm import LLM, SamplingParams
 
 from soar.data import MathProblem
@@ -109,8 +111,9 @@ def build_fail128(args):
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
-    print(f"[vllm] loading engine: {args.base_model}")
-    engine = LLM(
+    n_gpus = torch.cuda.device_count()
+    print(f"[vllm] loading engine: {args.base_model} (tensor_parallel_size={n_gpus})")
+    llm_kwargs = dict(
         model=args.base_model,
         dtype="bfloat16",
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -118,6 +121,9 @@ def build_fail128(args):
         enforce_eager=True,
         disable_log_stats=True,
     )
+    if n_gpus > 1:
+        llm_kwargs["tensor_parallel_size"] = n_gpus
+    engine = LLM(**llm_kwargs)
 
     sp = SamplingParams(
         n=args.n_samples,
@@ -133,7 +139,7 @@ def build_fail128(args):
 
     # vLLM batches generations efficiently even across requests; feed one problem at a time
     # (its 128 completions already saturate the engine).
-    for i, p in enumerate(problems):
+    for i, p in enumerate(tqdm(problems, desc=f"pass@{args.n_samples}")):
         prompt = student_chat_prompt(tok, p.problem)
         outs = engine.generate([prompt], sp, use_tqdm=False)
         completions = [o.text for o in outs[0].outputs]
