@@ -118,8 +118,9 @@ def build_fail128(args):
         dtype="bfloat16",
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
-        enforce_eager=True,
+        enforce_eager=False,
         disable_log_stats=True,
+        enable_prefix_caching=True,
     )
     if n_gpus > 1:
         llm_kwargs["tensor_parallel_size"] = n_gpus
@@ -137,20 +138,23 @@ def build_fail128(args):
     kept: List[MathProblem] = []
     t0 = time.time()
 
-    # vLLM batches generations efficiently even across requests; feed one problem at a time
-    # (its 128 completions already saturate the engine).
-    for i, p in enumerate(tqdm(problems, desc=f"pass@{args.n_samples}")):
-        prompt = student_chat_prompt(tok, p.problem)
-        outs = engine.generate([prompt], sp, use_tqdm=False)
-        completions = [o.text for o in outs[0].outputs]
-        n_ok = sum(1 for c in completions if success_math_answer(c, p.answer))
-        successes_per_problem.append(n_ok)
-        if n_ok == 0:
-            kept.append(p)
-        if (i + 1) % 10 == 0 or i == len(problems) - 1:
+    B = args.batch_problems
+    with tqdm(total=len(problems), desc=f"pass@{args.n_samples}") as pbar:
+        for i in range(0, len(problems), B):
+            chunk = problems[i:i + B]
+            prompts = [student_chat_prompt(tok, p.problem) for p in chunk]
+            outs = engine.generate(prompts, sp)
+            for p, out in zip(chunk, outs):
+                completions = [o.text for o in out.outputs]
+                n_ok = sum(1 for c in completions if success_math_answer(c, p.answer))
+                successes_per_problem.append(n_ok)
+                if n_ok == 0:
+                    kept.append(p)
+            pbar.update(len(chunk))
             dt = time.time() - t0
+            done = i + len(chunk)
             print(
-                f"[pass@{args.n_samples}] {i+1}/{len(problems)}  "
+                f"[pass@{args.n_samples}] {done}/{len(problems)}  "
                 f"kept(fail@{args.n_samples})={len(kept)}  elapsed={dt:.0f}s"
             )
 
@@ -203,6 +207,8 @@ def _parse_args():
                     help="If >0, only process the first N problems (smoke test).")
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     ap.add_argument("--max-model-len", type=int, default=2048)
+    ap.add_argument("--batch-problems", type=int, default=100,
+                    help="Number of problems to pool into one engine.generate() call.")
     return ap.parse_args()
 
 
