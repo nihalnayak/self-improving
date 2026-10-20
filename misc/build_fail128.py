@@ -52,20 +52,21 @@ _MATH_CONFIGS = (
 
 
 def _row_to_math_problem(row: dict) -> Optional[MathProblem]:
-    """Convert one HF row to a MathProblem. Returns None if no gold answer is extractable."""
-    problem = row.get("problem") or row.get("question") or ""
-    solution = row.get("solution") or row.get("answer") or ""
-    level = str(row.get("level", ""))
-    subject = row.get("type") or row.get("subject") or ""
-    gold = extract_boxed(solution) if solution else None
-    if gold is None and row.get("answer"):
-        gold = str(row["answer"]).strip()
-    if not gold or not problem:
+    """Convert one EleutherAI/hendrycks_math row to a MathProblem.
+    Returns None only if the \\boxed{} answer can't be extracted."""
+    problem = row["problem"]
+    solution = row["solution"]
+    gold = extract_boxed(solution)
+    if gold is None:
         return None
     qid = hashlib.sha1(problem.encode("utf-8")).hexdigest()[:16]
     return MathProblem(
-        qid=qid, problem=problem.strip(), answer=gold.strip(),
-        solution=solution, level=level, subject=subject,
+        qid=qid,
+        problem=problem.strip(),
+        answer=gold.strip(),
+        solution=solution,
+        level=str(row["level"]),
+        subject=row["type"],
     )
 
 
@@ -78,9 +79,6 @@ def load_math_test_split() -> List[MathProblem]:
         print(f"[data] loading {_MATH_REPO} config={cfg} split=test")
         ds = load_dataset(_MATH_REPO, cfg, split="test")
         for row in ds:
-            row = dict(row)
-            if not row.get("subject") and not row.get("type"):
-                row["subject"] = cfg
             p = _row_to_math_problem(row)
             if p is None:
                 skipped += 1
