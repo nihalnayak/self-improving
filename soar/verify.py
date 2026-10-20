@@ -14,7 +14,8 @@ Reward scheme follows SOAR paper §B.3:
     0.0   otherwise
 """
 
-from typing import Optional
+from math import comb
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 # ---- lm-eval-harness MATH helpers (verbatim) ---------------------------------
@@ -263,6 +264,38 @@ def score_math_answer(generated: str, gold: str) -> float:
     return 10.0
 
 
+# ---- pass@k (SOAR §4.3 metric) ----------------------------------------------
+
+def pass_at_k(
+    completions_by_question: Sequence[Sequence[str]],
+    golds: Sequence[str],
+    ks: Tuple[int, ...] = (1, 4, 8, 16, 32),
+) -> Dict[int, float]:
+    """Unbiased pass@k (Chen et al. 2021, HumanEval). For each question, let n be
+    the number of samples and c the number correct. Then
+        pass@k = 1 - C(n - c, k) / C(n, k)
+    (defaulting to 1.0 when n - c < k). We average over questions.
+
+    Paper §4.3: *"We report pass@k accuracy on the held-out fail@128 test set for
+    k ∈ {1, 4, 8, 16, 32}, using 32 samples per problem."*
+    """
+    assert len(completions_by_question) == len(golds), \
+        "pass_at_k: completions_by_question and golds must have equal length"
+    if not golds:
+        return {k: 0.0 for k in ks}
+    totals = {k: 0.0 for k in ks}
+    for comps, gold in zip(completions_by_question, golds):
+        n = len(comps)
+        c = sum(1 for g in comps if success_math_answer(g, gold))
+        for k in ks:
+            if n - c < k:
+                p = 1.0
+            else:
+                p = 1.0 - comb(n - c, k) / comb(n, k)
+            totals[k] += p
+    return {k: totals[k] / len(golds) for k in ks}
+
+
 if __name__ == "__main__":
     # extract_boxed — brace form
     assert extract_boxed(r"foo \boxed{42} bar") == "42"
@@ -301,4 +334,20 @@ if __name__ == "__main__":
     assert score_math_answer(r"\boxed{foo42bar}", "42") == 20.0
     assert score_math_answer(r"\boxed{foo}", "42") == 10.0
     assert score_math_answer("no boxed", "42") == 0.0
+
+    # pass@k — hand-computed sanity
+    # 1 question, 4 samples, 2 correct, 2 wrong (c=2, n=4):
+    #   pass@1 = 1 - C(2,1)/C(4,1) = 1 - 2/4 = 0.5
+    #   pass@2 = 1 - C(2,2)/C(4,2) = 1 - 1/6 ≈ 0.8333
+    #   pass@4 = 1.0 (n - c = 2 < 4)
+    comps = [[r"\boxed{42}", r"\boxed{42}", r"\boxed{0}", "no boxed"]]
+    r = pass_at_k(comps, ["42"], ks=(1, 2, 4))
+    assert abs(r[1] - 0.5) < 1e-9, r
+    assert abs(r[2] - (1 - 1/6)) < 1e-9, r
+    assert r[4] == 1.0, r
+    # Averaging: two questions, one at 0.0, one at 1.0 pass@1 → 0.5
+    comps = [[r"\boxed{1}"], [r"\boxed{2}"]]
+    r = pass_at_k(comps, ["42", "2"], ks=(1,))
+    assert r[1] == 0.5, r
+
     print("verify.py: all sanity checks passed")

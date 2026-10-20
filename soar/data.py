@@ -5,6 +5,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Tuple
 
+from datasets import load_dataset
+
 
 @dataclass
 class MathProblem:
@@ -32,14 +34,8 @@ class MathProblem:
 
 
 def _read_jsonl(path: Path) -> List[MathProblem]:
-    out = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            out.append(MathProblem.from_dict(json.loads(line)))
-    return out
+    ds = load_dataset("json", data_files=str(path), split="train")
+    return [MathProblem.from_dict(row) for row in ds]
 
 
 def load_fail128_split(dir: str) -> Tuple[List[MathProblem], List[MathProblem]]:

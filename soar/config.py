@@ -53,6 +53,23 @@ class SoarConfig:
     log_every: int = 1
     ckpt_every: int = 10
 
+    # ---- PQ baseline (SOAR paper Table 3 + B.6/B.7) ----
+    pq_max_train_steps: int = 1500       # paper Table 3, student eval-specific
+    pq_batch_problems: int = 8           # paper batch size: problems per gradient step
+    pq_group_size: int = 32              # paper group size: rollouts per problem
+    pq_lr: float = 1e-5                  # Table 3
+    pq_kl_beta: float = 0.001            # Table 3
+    pq_lr_warmup_steps: int = 20         # Table 3; 0 for curriculum (deferred)
+    pq_max_new_tokens: int = 1024        # Table 3
+    pq_temperature: float = 1.0          # Table 3 (sampling during training)
+    pq_diag_every: int = 50              # greedy Q_R diagnostic cadence (internal signal)
+    pq_slope_cma_window: int = 25        # B.6 reward-curve smoothing window
+    pq_slope_threshold: float = 0.15     # B.6 early-stopping normalized-slope threshold
+    pq_test_window: int = 200            # B.6 post-selection test-perf averaging window
+    pq_test_ckpt_every: int = 20         # how often to snapshot inside the 200-step window
+    pq_pass_at_k_samples: int = 32       # §4.3: 32 samples/problem for pass@k
+    pq_pass_at_k_ks: tuple = (1, 4, 8, 16, 32)
+
 
 def smoke_config() -> SoarConfig:
     """Tiny config for end-to-end smoke test."""
@@ -68,4 +85,15 @@ def smoke_config() -> SoarConfig:
         student_max_new_tokens=256,
         wandb_mode="disabled",
         out_dir="runs/smoke",
+        pq_max_train_steps=2,
+        pq_batch_problems=1,
+        pq_group_size=2,
+        pq_lr_warmup_steps=0,
+        pq_max_new_tokens=256,
+        pq_diag_every=1,
+        pq_slope_cma_window=1,
+        pq_test_window=1,
+        pq_test_ckpt_every=1,
+        pq_pass_at_k_samples=2,
+        pq_pass_at_k_ks=(1, 2),
     )

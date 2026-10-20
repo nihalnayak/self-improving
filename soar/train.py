@@ -204,6 +204,22 @@ def main(cfg: SoarConfig):
                                  for name, t in trained_snapshots[k_star][j_star].items()}
             n_promotions += 1
             append_promotion_questions(cfg.out_dir, n_promotions, X[k_star])
+            # Persist the promoted student LoRA to disk (needed for PS baseline eval).
+            # The live student weights are the LAST (k=g-1, j=r-1) trained student from the
+            # inner-training loop above — not necessarily the promoted (k*, j*). Restore first.
+            promo_dir = Path(cfg.out_dir) / "promotions" / f"promo_{n_promotions:03d}"
+            promo_dir.mkdir(parents=True, exist_ok=True)
+            prev_active = model.active_adapter
+            restore_student_lora(model, baseline_snapshot)
+            model.set_adapter("student")
+            model.save_pretrained(str(promo_dir), selected_adapters=["student"])
+            model.set_adapter(prev_active)
+            with open(Path(cfg.out_dir) / "promotions" / "index.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "promotion_idx": n_promotions, "outer_step": outer_step,
+                    "k_star": k_star, "j_star": j_star,
+                    "R_bar_t": R_bar_t, "moving_avg": ma,
+                }) + "\n")
             promotions_window.clear()
             promoted_this_step = 1
             print(f"[step {outer_step}] PROMOTED (k*={k_star}, j*={j_star}, MA={ma:+.3f})  "
