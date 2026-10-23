@@ -12,16 +12,16 @@ class SoarConfig:
     # ---- data ----
     # Dir produced by `python -m misc.build_fail128`. Contains train.jsonl / test.jsonl / meta.json.
     fail128_dir: str = "files/data/math_fail128"
-    n_reward_questions: int = 32        # |Q_R|: paper uses 64
+    n_reward_questions: int = 64        # |Q_R|: paper uses 64
     seed: int = 0
 
     # ---- outer loop (teacher) ----
     n_outer_steps: int = 50             # paper uses 200
     outer_group_size: int = 4           # g: datasets per outer step (paper uses up to 8)
-    inner_dataset_size: int = 16        # n: problems per dataset X_k (paper uses 64)
+    inner_dataset_size: int = 64        # n: problems per dataset X_k (paper uses 64)
     r_parallel_students: int = 1        # r: parallel student runs per dataset (paper uses 4)
-    teacher_lr: float = 1e-5
-    teacher_max_new_tokens: int = 1024  # changed from the original paper
+    teacher_lr: float = 1e-4            # paper uses 1e-5
+    teacher_max_new_tokens: int = 512
     teacher_temperature: float = 1.0
     teacher_rejection_cap: int = 8      # safety cap on rejection sampling multiplier
 
