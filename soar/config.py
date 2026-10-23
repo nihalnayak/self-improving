@@ -21,7 +21,7 @@ class SoarConfig:
     inner_dataset_size: int = 16        # n: problems per dataset X_k (paper uses 64)
     r_parallel_students: int = 1        # r: parallel student runs per dataset (paper uses 4)
     teacher_lr: float = 1e-5
-    teacher_max_new_tokens: int = 512
+    teacher_max_new_tokens: int = 1024  # changed from the original paper
     teacher_temperature: float = 1.0
     teacher_rejection_cap: int = 8      # safety cap on rejection sampling multiplier
 

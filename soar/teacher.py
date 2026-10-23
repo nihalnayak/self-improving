@@ -28,7 +28,7 @@ TEACHER_PROMPT = (
     "    Constraints:\n"
     "        - The problem must be original, challenging, and require at least 2--3 steps of reasoning.\n"
     "        - Output exactly ONE problem. You MUST follow the specified format EXACTLY.\n"
-    "    Begin now:"
+    "Begin now:"
 )
 
 

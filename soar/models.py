@@ -1,11 +1,13 @@
 """Load base model + 2 LoRA adapters (teacher, student) and a vLLM engine on the same GPU."""
 
+import functools
 from typing import Tuple
 
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from soar import dist_utils
 from soar.config import SoarConfig
 
 
@@ -22,17 +24,36 @@ STUDENT_PROMPT_TEMPLATE = (
 )
 
 
+def _decoder_layer_cls(base_model) -> type:
+    """Find the transformer-block class for FSDP's `transformer_auto_wrap_policy`.
+
+    Walks the model and picks the first module class whose name ends in "DecoderLayer"
+    (Llama, Qwen, Mistral, ...). Falls back to the top-level base model class.
+    """
+    for module in base_model.modules():
+        name = type(module).__name__
+        if name.endswith("DecoderLayer"):
+            return type(module)
+    return type(base_model)
+
+
 def load_base_and_adapters(cfg: SoarConfig) -> Tuple[PeftModel, "AutoTokenizer"]:
-    """Return a PEFT-wrapped model with two adapters: 'teacher' (active) and 'student'."""
+    """Return a PEFT-wrapped model with two adapters: 'teacher' (active) and 'student'.
+
+    When launched under torchrun (WORLD_SIZE > 1), the returned model is additionally
+    wrapped with FSDP (FULL_SHARD, bf16 compute, use_orig_params=True for PEFT compat).
+    """
     tok = AutoTokenizer.from_pretrained(cfg.base_model)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
 
+    # Pin this rank's shard to its local GPU; falls back to cuda:0 single-GPU.
+    device = f"cuda:{dist_utils.local_rank()}"
     base = AutoModelForCausalLM.from_pretrained(
         cfg.base_model,
         dtype=torch.bfloat16,
-        device_map="cuda",
+        device_map={"": device},
     )
     base.config.use_cache = False  # safer during training
 
@@ -48,6 +69,32 @@ def load_base_and_adapters(cfg: SoarConfig) -> Tuple[PeftModel, "AutoTokenizer"]
     model.add_adapter("student", lora_cfg)
     # start with teacher active; main loop swaps as needed
     model.set_adapter("teacher")
+
+    if dist_utils.is_distributed():
+        from torch.distributed.fsdp import (
+            FullyShardedDataParallel as FSDP,
+            MixedPrecision,
+            ShardingStrategy,
+        )
+        from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+        wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={_decoder_layer_cls(base)},
+        )
+        model = FSDP(
+            model,
+            auto_wrap_policy=wrap_policy,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            mixed_precision=MixedPrecision(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+                buffer_dtype=torch.bfloat16,
+            ),
+            device_id=dist_utils.local_rank(),
+            use_orig_params=True,  # REQUIRED for PEFT set_adapter / disable_adapter
+            limit_all_gathers=True,
+        )
     return model, tok
 
 
