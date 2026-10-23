@@ -1,6 +1,7 @@
 """Load base model + 2 LoRA adapters (teacher, student) and a vLLM engine on the same GPU."""
 
 import functools
+import os
 from typing import Tuple
 
 import torch
@@ -70,6 +71,13 @@ def load_base_and_adapters(cfg: SoarConfig) -> Tuple[PeftModel, "AutoTokenizer"]
     # start with teacher active; main loop swaps as needed
     model.set_adapter("teacher")
 
+    # PEFT initializes LoRA weights in fp32; the base is bf16. FSDP flattens each
+    # decoder layer's params into one FlatParameter and refuses mixed dtypes, so
+    # cast the trainable (LoRA) params to bf16 before wrapping.
+    for p in model.parameters():
+        if p.requires_grad and p.dtype == torch.float32:
+            p.data = p.data.to(torch.bfloat16)
+
     if dist_utils.is_distributed():
         from torch.distributed.fsdp import (
             FullyShardedDataParallel as FSDP,
@@ -105,17 +113,34 @@ def load_vllm_engine(cfg: SoarConfig):
     (which already live on this GPU) have room.
     """
     from vllm import LLM
-    return LLM(
-        model=cfg.base_model,
-        enable_lora=True,
-        max_loras=cfg.vllm_max_loras,
-        max_lora_rank=cfg.lora_r,
-        dtype="bfloat16",
-        gpu_memory_utilization=cfg.vllm_gpu_memory_utilization,
-        max_model_len=cfg.vllm_max_model_len,
-        enforce_eager=True,       # skip torch.compile for simpler launch
-        disable_log_stats=True,
-    )
+    # vLLM spawns an EngineCore subprocess that inherits our env. Under torchrun
+    # the inherited RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT make vLLM's internal
+    # process-group setup act like a phantom rank and hang on TCPStore. Stash
+    # them for the duration of LLM() — the already-initialised parent group
+    # lives in memory and is unaffected.
+    stash = {}
+    for k in (
+        "RANK", "WORLD_SIZE", "LOCAL_RANK", "MASTER_ADDR", "MASTER_PORT",
+        "LOCAL_WORLD_SIZE", "GROUP_RANK", "ROLE_RANK", "ROLE_NAME",
+        "TORCHELASTIC_RUN_ID", "TORCHELASTIC_USE_AGENT_STORE",
+        "TORCHELASTIC_MAX_RESTARTS", "TORCHELASTIC_RESTART_COUNT",
+    ):
+        if k in os.environ:
+            stash[k] = os.environ.pop(k)
+    try:
+        return LLM(
+            model=cfg.base_model,
+            enable_lora=True,
+            max_loras=cfg.vllm_max_loras,
+            max_lora_rank=cfg.lora_r,
+            dtype="bfloat16",
+            gpu_memory_utilization=cfg.vllm_gpu_memory_utilization,
+            max_model_len=cfg.vllm_max_model_len,
+            enforce_eager=True,       # skip torch.compile for simpler launch
+            disable_log_stats=True,
+        )
+    finally:
+        os.environ.update(stash)
 
 
 def chat_prompt(tok, user_msg: str, system_msg: str | None = None) -> str:

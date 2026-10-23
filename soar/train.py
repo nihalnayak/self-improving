@@ -146,6 +146,9 @@ def main(cfg: SoarConfig):
         engine = load_vllm_engine(cfg)
     else:
         engine = None
+    # Hold non-main ranks here until rank 0 finishes vLLM init; otherwise they
+    # race into the first FSDP collective below and silently block.
+    dist_utils.barrier()
     _log(f"[setup] loading fail@128 split from {cfg.fail128_dir}")
     train_set, test_set = load_fail128_split(cfg.fail128_dir)
     _log(f"[setup] |train|={len(train_set)}  |test|={len(test_set)}")
