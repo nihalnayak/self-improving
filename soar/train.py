@@ -431,16 +431,62 @@ def main(cfg: SoarConfig):
 def _parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true", help="tiny end-to-end sanity run")
-    ap.add_argument("--out", type=str, default=None, help="override out_dir")
-    ap.add_argument("--fail128-dir", type=str, default=None, help="override fail128_dir")
+
+    # model
+    ap.add_argument("--base-model", type=str, default=None)
+    ap.add_argument("--lora-r", type=int, default=None)
+    ap.add_argument("--lora-alpha", type=int, default=None)
+
+    # data
+    ap.add_argument("--fail128-dir", type=str, default=None)
+    ap.add_argument("--n-reward-questions", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=None)
+
+    # outer (teacher)
+    ap.add_argument("--n-outer-steps", type=int, default=None)
+    ap.add_argument("--outer-group-size", type=int, default=None)
+    ap.add_argument("--inner-dataset-size", type=int, default=None)
+    ap.add_argument("--r-parallel-students", type=int, default=None)
+    ap.add_argument("--teacher-lr", type=float, default=None)
+    ap.add_argument("--teacher-max-new-tokens", type=int, default=None)
+    ap.add_argument("--teacher-temperature", type=float, default=None)
+    ap.add_argument("--teacher-rejection-cap", type=int, default=None)
+
+    # inner (student)
+    ap.add_argument("--inner-steps", type=int, default=None)
+    ap.add_argument("--student-rollouts", type=int, default=None)
+    ap.add_argument("--student-lr", type=float, default=None)
+    ap.add_argument("--student-max-new-tokens", type=int, default=None)
+    ap.add_argument("--student-temperature", type=float, default=None)
+
+    # rl
+    ap.add_argument("--kl-beta", type=float, default=None)
+    ap.add_argument("--max-prompt-len", type=int, default=None)
+
+    # promotion
+    ap.add_argument("--promotion-threshold", type=float, default=None)
+    ap.add_argument("--promotion-window", type=int, default=None)
+    ap.add_argument("--max-promotions-to-track", type=int, default=None)
+
+    # vllm
+    ap.add_argument("--vllm-gpu-memory-utilization", type=float, default=None)
+    ap.add_argument("--vllm-max-model-len", type=int, default=None)
+    ap.add_argument("--vllm-max-loras", type=int, default=None)
+
+    # logging
+    ap.add_argument("--wandb-project", type=str, default=None)
+    ap.add_argument("--wandb-mode", type=str, default=None)
+    ap.add_argument("--out-dir", type=str, default=None)
+    ap.add_argument("--log-every", type=int, default=None)
+    ap.add_argument("--ckpt-every", type=int, default=None)
     return ap.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     cfg = smoke_config() if args.smoke else SoarConfig()
-    if args.out:
-        cfg.out_dir = args.out
-    if args.fail128_dir:
-        cfg.fail128_dir = args.fail128_dir
+    for name, value in vars(args).items():
+        if name == "smoke" or value is None:
+            continue
+        setattr(cfg, name, value)
     main(cfg)
