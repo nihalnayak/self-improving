@@ -238,6 +238,9 @@ def main(cfg: SoarConfig):
         R_matrix: List[List[float]] = [[0.0] * r_parallel for _ in range(g)]
         # Keep snapshots of each (k, j) trained student in case we promote.
         trained_snapshots: List[List[Optional[dict]]] = [[None] * r_parallel for _ in range(g)]
+        outer_n_rollouts = 0
+        outer_n_correct = 0
+        outer_reward_sum = 0.0
         run_idx = 0
         for k in range(g):
             for j in range(r_parallel):
@@ -249,9 +252,13 @@ def main(cfg: SoarConfig):
                 # or the step counter across runs would make R_{k,j} non-exchangeable.
                 student_opt = torch.optim.AdamW(_student_params(model), lr=cfg.student_lr)
                 tag = f"o{outer_step}_k{k}_j{j}"
-                inner_train_student_on_dataset(
+                inner_stats = inner_train_student_on_dataset(
                     model, tok, engine, cfg, student_opt, X[k], tag=tag, rng=rng,
                 )
+                run_n = int(inner_stats.get("n_rollouts", 0))
+                outer_n_rollouts += run_n
+                outer_n_correct += int(inner_stats.get("n_correct", 0))
+                outer_reward_sum += float(inner_stats.get("mean_reward_run", 0.0)) * run_n
                 trained_path = sync_adapter_to_disk(model, "student", cfg.out_dir, f"{tag}_trained")
                 if dist_utils.is_main():
                     acc = eval_student_on(engine, trained_path, Q_R, tok, cfg)
@@ -380,6 +387,10 @@ def main(cfg: SoarConfig):
             "teacher/dataset_reward_spread": R_spread,
             "teacher/yield": teacher_yield,
             "teacher/total_generated": total_generated,
+            "student/n_correct": outer_n_correct,
+            "student/n_rollouts": outer_n_rollouts,
+            "student/correct_rate": outer_n_correct / max(outer_n_rollouts, 1),
+            "student/mean_reward": outer_reward_sum / max(outer_n_rollouts, 1),
             "promotion/count_total": n_promotions,
             "promotion/triggered_this_step": promoted_this_step,
             "promotion/moving_avg": ma if ma != -float("inf") else 0.0,
@@ -401,6 +412,8 @@ def main(cfg: SoarConfig):
              f"dt={dt:.1f}s  [gen={teacher_gen_sec:.0f}s eval={baseline_eval_sec:.0f}s "
              f"inner={inner_train_sec:.0f}s update={teacher_update_sec:.0f}s]  "
              f"peak_mem={gpu_mem_gb:.1f}GB")
+        _log(f"  student: {outer_n_correct}/{outer_n_rollouts} rollouts correct "
+             f"({outer_n_correct / max(outer_n_rollouts, 1):.1%})")
 
         if outer_step % cfg.ckpt_every == 0:
             ckpt_dir = Path(cfg.out_dir) / f"ckpt_outer{outer_step}"

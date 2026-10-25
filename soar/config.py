@@ -8,6 +8,7 @@ class SoarConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_target_modules: tuple = ("q_proj", "k_proj", "v_proj", "o_proj")
+    use_lora: bool = False  # train_trl.py: wrap student with PEFT (ref = base w/ adapter disabled)
 
     # ---- data ----
     # Dir produced by `python -m misc.build_fail128`. Contains train.jsonl / test.jsonl / meta.json.
@@ -20,15 +21,17 @@ class SoarConfig:
     outer_group_size: int = 4           # g: datasets per outer step (paper uses up to 8)
     inner_dataset_size: int = 64        # n: problems per dataset X_k (paper uses 64)
     r_parallel_students: int = 1        # r: parallel student runs per dataset (paper uses 4)
-    teacher_lr: float = 1e-4            # paper uses 1e-5
+    teacher_lr: float = 1e-5            # paper uses 1e-5
     teacher_max_new_tokens: int = 512
     teacher_temperature: float = 1.0
-    teacher_rejection_cap: int = 8      # safety cap on rejection sampling multiplier
+    teacher_rejection_cap: int = 16      # safety cap on rejection sampling multiplier
 
     # ---- inner loop (student) ----
     inner_steps: int = 10               # K: student RLOO steps per X_k (paper)
-    student_rollouts: int = 8           # N: completions per prompt (paper's batch size 8)
-    student_lr: float = 1e-5
+    inner_steps_per_promotion: int = 5  # paper B.7: "+5 steps" per promotion stage
+    student_group_size: int = 8         # G: completions per prompt (paper uses 32)
+    student_batch_problems: int = 8     # B: paper's batch size (prompts per gradient step)
+    student_lr: float = 1e-5            # paper uses 1e-5
     student_max_new_tokens: int = 1024  # matches fail@128 token budget
     student_temperature: float = 1.0
 
@@ -42,7 +45,7 @@ class SoarConfig:
     max_promotions_to_track: int = 4    # paper observes a max of 4 promotions in practice
 
     # ---- vllm ----
-    vllm_gpu_memory_utilization: float = 0.35
+    vllm_gpu_memory_utilization: float = 0.25
     vllm_max_model_len: int = 2048
     vllm_max_loras: int = 2
 
@@ -79,7 +82,8 @@ def smoke_config() -> SoarConfig:
         inner_dataset_size=2,
         r_parallel_students=1,
         inner_steps=1,
-        student_rollouts=2,
+        student_group_size=2,
+        student_batch_problems=1,
         n_reward_questions=4,
         teacher_max_new_tokens=256,
         student_max_new_tokens=256,

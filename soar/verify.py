@@ -17,6 +17,8 @@ Reward scheme follows SOAR paper §B.3:
 from math import comb
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from math_verify import parse, verify
+
 
 # ---- lm-eval-harness MATH helpers (verbatim) ---------------------------------
 
@@ -223,22 +225,27 @@ def extract_boxed(text: str) -> Optional[str]:
 
 
 def is_equiv(str1: Optional[str], str2: Optional[str], verbose: bool = False) -> bool:
-    """lm-eval-harness MATH equivalence: normalize both sides with `_strip_string`
-    and exact-match. Deterministic, no sympy, no timeouts."""
+    """SOAR paper's grader: `math_verify.verify(parse(gold), parse(pred))`.
+
+    Parse both sides as `\\boxed{...}` so math_verify picks the LaTeX extraction
+    path and returns a comparable SymPy object. Falls back to the lm-eval-harness
+    string-normalization grader when math_verify can't parse (keeps a batch from
+    crashing on a single malformed expression)."""
     if str1 is None and str2 is None:
-        print("WARNING: Both None")
         return True
     if str1 is None or str2 is None:
         return False
-
     try:
-        ss1 = _strip_string(str1)
-        ss2 = _strip_string(str2)
-        if verbose:
-            print(ss1, ss2)
-        return ss1 == ss2
+        gold = parse(f"\\boxed{{{str1}}}")
+        pred = parse(f"\\boxed{{{str2}}}")
+        if not gold or not pred:
+            return _strip_string(str1) == _strip_string(str2)
+        return bool(verify(gold, pred))
     except Exception:
-        return str1 == str2
+        try:
+            return _strip_string(str1) == _strip_string(str2)
+        except Exception:
+            return str1 == str2
 
 
 def success_math_answer(generated: str, gold: str) -> bool:

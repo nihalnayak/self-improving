@@ -8,3 +8,4 @@ vllm==0.11.0
 datasets==5.0.1
 accelerate==1.14.0
 wandb==0.29.0
+math-verify==0.9.0

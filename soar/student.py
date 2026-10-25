@@ -1,12 +1,11 @@
 """Inner loop: RLOO steps on a teacher-generated dataset X_k.
 
 Follows paper §3.3: `cfg.inner_steps` steps (paper uses 10), each with a batch of
-`cfg.student_rollouts` completions (paper uses 8) on one problem sampled from X_k.
+`cfg.student_group_size` completions (paper uses 32) on `batch_problems` problems
+sampled from X_k (paper's inner-loop batch is 8 problems per gradient step).
 
-The `batch_problems` kwarg generalises the step to `batch_problems` problems per
-gradient update (SOAR Table 3 sets batch=8 for PQ eval runs); groups remain
-per-problem of size `cfg.student_rollouts`. Default `batch_problems=1` preserves
-the single-problem SOAR inner-loop behavior exactly.
+Groups are per-problem of size `cfg.student_group_size`. `batch_problems` is a
+runtime kwarg so train_pq.py can drive it from `cfg.pq_batch_problems`.
 """
 
 import random
@@ -71,12 +70,11 @@ def inner_train_student_on_dataset(
 ) -> Dict[str, Any]:
     """Run RLOO steps on `problems`.
 
-    Each step samples `batch_problems` problems and generates `cfg.student_rollouts`
+    Each step samples `batch_problems` problems and generates `cfg.student_group_size`
     completions per problem (one RLOO group per problem). Advantages are computed
-    within each group; all `batch_problems * student_rollouts` sequences form a
+    within each group; all `batch_problems * student_group_size` sequences form a
     single policy-gradient batch per step (one gradient update per step).
 
-    - `batch_problems=1` matches the SOAR inner loop (one problem, one gradient step).
     - `inner_steps` overrides `cfg.inner_steps` when provided (useful for callers that
       want to drive the step count externally, e.g. train_pq.py).
     """
@@ -84,9 +82,12 @@ def inner_train_student_on_dataset(
     assert batch_problems >= 1
     rng = rng or random.Random()
     n_steps = inner_steps if inner_steps is not None else cfg.inner_steps
-    group_size = cfg.student_rollouts
+    group_size = cfg.student_group_size
     peft_model.set_adapter("student")
     stats: Dict[str, Any] = {"mean_reward": 0.0}
+    n_rollouts_total = 0
+    n_correct_total = 0
+    reward_sum_total = 0.0
 
     for k in range(n_steps):
         # Rank 0 drives problem selection + vLLM generation + reward scoring;
@@ -123,6 +124,10 @@ def inner_train_student_on_dataset(
         else:
             payload = None
         completions, rewards = dist_utils.broadcast_object(payload, src=0)
+
+        n_rollouts_total += len(rewards)
+        n_correct_total += sum(1 for r in rewards if r >= 120.0)
+        reward_sum_total += float(sum(rewards))
 
         dev = next(peft_model.parameters()).device
         rewards_t = torch.tensor(rewards, dtype=torch.float32, device=dev)
@@ -176,4 +181,7 @@ def inner_train_student_on_dataset(
         optimizer.zero_grad(set_to_none=True)
         stats = {k2: (v.item() if isinstance(v, torch.Tensor) else v) for k2, v in out.items()}
         stats["mean_reward"] = float(rewards_t.mean().item())
+    stats["n_rollouts"] = n_rollouts_total
+    stats["n_correct"] = n_correct_total
+    stats["mean_reward_run"] = reward_sum_total / max(n_rollouts_total, 1)
     return stats

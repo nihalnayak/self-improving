@@ -4,7 +4,7 @@ Difference from GRPO: no std-normalization. Per-sequence advantage is leave-one-
     adv[i] = reward[i] - mean(reward[j] for j != i in same group)
            = (G * r[i] - sum_group(r)) / (G - 1)
 
-For the student (inner loop): group = `cfg.student_rollouts` completions on one problem.
+For the student (inner loop): group = `cfg.student_group_size` completions on one problem.
 For the teacher (outer loop): advantages are computed at the **dataset** level over `g`
 datasets (one scalar per X_k) and broadcast to each X_k's `n` constituent rollouts.
 

@@ -168,7 +168,7 @@ def main(cfg: SoarConfig, soar_run: str, out_dir: str) -> None:
     # Shallow-copy cfg with PQ-specific overrides for the inner RLOO call.
     cfg_pq = dataclasses.replace(
         cfg,
-        student_rollouts=cfg.pq_group_size,
+        student_group_size=cfg.pq_group_size,
         student_max_new_tokens=cfg.pq_max_new_tokens,
         student_temperature=cfg.pq_temperature,
         kl_beta=cfg.pq_kl_beta,
