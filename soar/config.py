@@ -57,7 +57,7 @@ class SoarConfig:
     ckpt_every: int = 10
 
     # ---- PQ baseline (SOAR paper Table 3 + B.6/B.7) ----
-    pq_max_train_steps: int = 1500       # paper Table 3, student eval-specific
+    pq_max_train_steps: int = 200        # paper Table 3 is 1500; capped at 200 for the sweep
     pq_batch_problems: int = 8           # paper batch size: problems per gradient step
     pq_group_size: int = 32              # paper group size: rollouts per problem
     pq_lr: float = 1e-5                  # Table 3
