@@ -2,18 +2,19 @@
 """Plot pass@k curves across baselines for a given model.
 
 Walks `<results_root>/<model_short>/<run_name>/<baseline>.json` emitted by
-`baselines.*` scripts and plots one line per (baseline_tag, run_name) with
+`baselines.*` scripts and plots one line per (baseline_tag, config) with
 x = k, y = accuracy. Writes `<results_root>/<model_short>/pass_at_k.pdf`
 (and `.png` with --save-png).
 
-Styled after /n/holylabs/dam_lab/Users/nnayak1/synthetic-personas/analysis/samples_vs_vendi_v2.py.
+Explicit two-level loop: outer over baselines (PS, PQ), inner over each
+baseline's configs (one per SOAR run for PS; one per SOAR run × PQ-LR for PQ).
+Stable colors per baseline tag so PS/PQ keep the same hue when new runs land.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from itertools import cycle
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
@@ -32,6 +32,11 @@ LEGEND_FONT_SIZE = 16
 
 _SET2 = sns.color_palette("Set2", 8)
 MARKER_CYCLE = ("o", "s", "D", "^", "v", "P", "X", "*")
+
+# Order the baselines appear in the legend (and get pinned colors).
+BASELINE_ORDER = ["PS", "PQ"]
+TAG_FULL_NAMES = {"PS": "Promoted Student", "PQ": "Promotion Question"}
+TAG_COLORS = {"PS": _SET2[0], "PQ": _SET2[1]}
 
 
 def load_records(results_root: Path, model_short: str) -> list[dict[str, Any]]:
@@ -60,47 +65,35 @@ def _apply_plot_theme() -> None:
     plt.rcParams.update(rc)
 
 
-def _build_dataframe(records: list[dict[str, Any]]) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for rec in records:
-        tag = rec.get("baseline_tag")
-        run_name = rec.get("run_name")
-        pk = rec.get("test_pass_at_k") or {}
-        if not tag or not run_name or not pk:
-            print(f"[plot] skip record missing fields: {rec.get('run_name', '?')}",
-                  flush=True)
+def _make_label(tag: str, rec: dict[str, Any]) -> str:
+    run_name = rec.get("run_name", "?")
+    if tag == "PQ":
+        lr = rec.get("lr")
+        if lr is not None:
+            soar_short = run_name
+            suffix = f"-pqlr{lr}"
+            if soar_short.endswith(suffix):
+                soar_short = soar_short[: -len(suffix)]
+            return f"PQ · lr={lr} · {soar_short}"
+        return f"PQ · {run_name}"
+    if tag == "PS":
+        return f"PS · {run_name}"
+    return f"{tag} · {run_name}"
+
+
+def _parse_pass_at_k(rec: dict[str, Any]) -> tuple[list[int], list[float]]:
+    pk = rec.get("test_pass_at_k") or {}
+    pairs: list[tuple[int, float]] = []
+    for k_str, v in pk.items():
+        try:
+            pairs.append((int(k_str), float(v)))
+        except (TypeError, ValueError):
             continue
-        label = f"{tag} ({run_name})"
-        for k_str, acc in pk.items():
-            try:
-                k = int(k_str)
-                v = float(acc)
-            except (TypeError, ValueError):
-                continue
-            rows.append({
-                "baseline_tag": tag,
-                "run_name": run_name,
-                "label": label,
-                "K": k,
-                "accuracy": v,
-            })
-    return pd.DataFrame(rows)
-
-
-def _assign_styles(df: pd.DataFrame) -> tuple[dict[str, Any], dict[str, str]]:
-    """Stable color per baseline_tag; distinct marker per (tag, run_name)."""
-    tags = sorted(df["baseline_tag"].unique())
-    tag_color = {tag: _SET2[i % len(_SET2)] for i, tag in enumerate(tags)}
-
-    label_color: dict[str, Any] = {}
-    label_marker: dict[str, str] = {}
-    for tag in tags:
-        labels_for_tag = sorted(df.loc[df["baseline_tag"] == tag, "label"].unique())
-        marker_iter = cycle(MARKER_CYCLE)
-        for label in labels_for_tag:
-            label_color[label] = tag_color[tag]
-            label_marker[label] = next(marker_iter)
-    return label_color, label_marker
+    pairs.sort()
+    if not pairs:
+        return [], []
+    ks, ys = zip(*pairs)
+    return list(ks), list(ys)
 
 
 def build_plot(
@@ -114,34 +107,53 @@ def build_plot(
         print(f"[plot] no records for {model_short}; skipping", flush=True)
         return
 
-    df = _build_dataframe(records)
-    if df.empty:
-        print(f"[plot] no usable rows for {model_short}; skipping", flush=True)
-        return
-
     _apply_plot_theme()
-    label_color, label_marker = _assign_styles(df)
-    label_order = sorted(df["label"].unique())
-
     fig, ax = plt.subplots(figsize=(9.5, 6.0))
-    sns.lineplot(
-        data=df.sort_values("K"),
-        x="K",
-        y="accuracy",
-        hue="label",
-        hue_order=label_order,
-        style="label",
-        style_order=label_order,
-        markers=label_marker,
-        palette=label_color,
-        linewidth=5.0,
-        markersize=15.0,
-        legend=False,
-        ax=ax,
+
+    legend_handles: list[Line2D] = []
+    all_ks: set[int] = set()
+    n_lines_drawn = 0
+
+    # Collect baselines in BASELINE_ORDER first, then any unknown tags afterward.
+    seen_tags = {r.get("baseline_tag") for r in records if r.get("baseline_tag")}
+    ordered_tags = [t for t in BASELINE_ORDER if t in seen_tags] + sorted(
+        seen_tags - set(BASELINE_ORDER)
     )
 
+    for tag_i, tag in enumerate(ordered_tags):
+        configs = sorted(
+            [r for r in records if r.get("baseline_tag") == tag],
+            key=lambda r: r.get("run_name", ""),
+        )
+        color = TAG_COLORS.get(tag, _SET2[tag_i % len(_SET2)])
+        for i, rec in enumerate(configs):
+            ks, ys = _parse_pass_at_k(rec)
+            if not ks:
+                print(
+                    f"[plot] skip (no test_pass_at_k): {rec.get('run_name', '?')}",
+                    flush=True,
+                )
+                continue
+            marker = MARKER_CYCLE[i % len(MARKER_CYCLE)]
+            label = _make_label(tag, rec)
+            ax.plot(ks, ys, color=color, marker=marker,
+                    linewidth=5.0, markersize=15.0, label=label)
+            legend_handles.append(
+                Line2D(
+                    [0], [0], color=color, marker=marker,
+                    markersize=12, linewidth=5.0, label=label,
+                )
+            )
+            all_ks.update(ks)
+            n_lines_drawn += 1
+
+    if n_lines_drawn == 0:
+        print(f"[plot] no usable records for {model_short}; skipping", flush=True)
+        plt.close(fig)
+        return
+
     ax.set_xscale("log", base=2)
-    xticks = sorted({int(k) for k in df["K"].tolist()})
+    xticks = sorted(all_ks)
     ax.set_xticks(xticks)
     ax.set_xticklabels([str(k) for k in xticks])
     ax.set_xlabel("k")
@@ -149,21 +161,9 @@ def build_plot(
     ax.set_ylabel("pass@k")
     ax.set_title(f"pass@k — {model_short}")
 
-    handles = [
-        Line2D(
-            [0],
-            [0],
-            color=label_color[label],
-            marker=label_marker[label],
-            markersize=12,
-            linewidth=5.0,
-            label=label,
-        )
-        for label in label_order
-    ]
-    ncol = min(2, len(handles))
+    ncol = min(2, len(legend_handles))
     fig.legend(
-        handles=handles,
+        handles=legend_handles,
         loc="lower center",
         bbox_to_anchor=(0.5, -0.02),
         ncol=ncol,
