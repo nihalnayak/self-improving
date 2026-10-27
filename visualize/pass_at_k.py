@@ -157,7 +157,6 @@ def build_plot(
     ax.set_xticks(xticks)
     ax.set_xticklabels([str(k) for k in xticks])
     ax.set_xlabel("k")
-    ax.set_ylim(0.0, 1.0)
     ax.set_ylabel("pass@k")
     ax.set_title(f"pass@k — {model_short}")
 
