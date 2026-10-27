@@ -38,13 +38,13 @@ import torch
 import wandb
 from accelerate import Accelerator
 from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
-from vllm import LLM
+from vllm import LLM, SamplingParams
 
 from soar.config import SoarConfig
 from soar.data import MathProblem, _read_jsonl, load_fail128_split
-from soar.verify import score_math_answer
+from soar.verify import score_math_answer, success_math_answer
 
 
 # ------------- paper §B.1 prompt (identical to soar.train_single_gpu_trl_lora) -------------
@@ -80,6 +80,48 @@ _original_llm_init = LLM.__init__
 def _eager_llm_init(self, *args, **kwargs):
     kwargs["enforce_eager"] = True
     return _original_llm_init(self, *args, **kwargs)
+
+
+class PeriodicValCallback(TrainerCallback):
+    """Every N trainer global_steps, greedy-eval the student (via colocate
+    vLLM) on each named question set and log `pq/val/{name}_acc` to wandb.
+    Scoring matches `eval.py` (boxed-equiv via `success_math_answer`), so the
+    final `fail128_test` curve lines up with the post-training `pq/test_pass_at_1`.
+    """
+
+    def __init__(self, tok, questions_by_name, every, max_new_tokens):
+        self.tok = tok
+        self.questions = questions_by_name
+        self.every = every
+        self.max_new_tokens = max_new_tokens
+        self.trainer = None  # late-bound after GRPOTrainer construction
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.trainer is None or state.global_step == 0:
+            return
+        if state.global_step % self.every != 0:
+            return
+        gen = getattr(self.trainer, "vllm_generation", None)
+        if gen is None or getattr(gen, "llm", None) is None:
+            return
+        # TRL only syncs weights before each rollout; force latest LoRA.
+        gen.sync_weights()
+        sp = SamplingParams(temperature=0.0, top_p=1.0,
+                            max_tokens=self.max_new_tokens)
+        metrics = {}
+        for name, qs in self.questions.items():
+            if not qs:
+                continue
+            prompts = [_student_prompt(q.problem) for q in qs]
+            outs = gen.llm.generate(prompts, sp, use_tqdm=False)
+            correct = sum(1.0 for o, q in zip(outs, qs)
+                          if success_math_answer(o.outputs[0].text, q.answer))
+            metrics[f"pq/val/{name}_acc"] = correct / len(qs)
+        if metrics:
+            print(f"[pq] step={state.global_step} val: "
+                  + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
+                              for k, v in metrics.items()))
+            wandb.log(metrics, step=state.global_step)
 
 
 def _teardown_colocate_vllm(trainer) -> None:
@@ -146,6 +188,9 @@ def _build_grpo_args(cfg: SoarConfig, out_dir: Path, run_name: str, lr: float,
 
 
 def _train_pq_student(cfg: SoarConfig, args, combined: List[MathProblem],
+                       d_best: List[MathProblem],
+                       fail128_train: List[MathProblem],
+                       fail128_test: List[MathProblem],
                        out_dir: Path) -> Path:
     """TRL GRPO training on `combined` problems. Returns the saved LoRA path."""
     tok = AutoTokenizer.from_pretrained(cfg.base_model)
@@ -193,6 +238,17 @@ def _train_pq_student(cfg: SoarConfig, args, combined: List[MathProblem],
         task_type="CAUSAL_LM",
     )
 
+    val_cb = PeriodicValCallback(
+        tok=tok,
+        questions_by_name={
+            "d_best": list(d_best),
+            "fail128_train": list(fail128_train),
+            "fail128_test": list(fail128_test),
+        },
+        every=args.val_every,
+        max_new_tokens=cfg.pq_max_new_tokens,
+    )
+
     print("[pq] constructing GRPOTrainer (enforce_eager patched)")
     with patch.object(LLM, "__init__", _eager_llm_init):
         trainer = GRPOTrainer(
@@ -202,9 +258,11 @@ def _train_pq_student(cfg: SoarConfig, args, combined: List[MathProblem],
             train_dataset=ds,
             processing_class=tok,
             peft_config=peft_config,
+            callbacks=[val_cb],
         )
+    val_cb.trainer = trainer
 
-    print(f"[pq] trainer.train(max_steps={args.max_steps})")
+    print(f"[pq] trainer.train(max_steps={args.max_steps}, val_every={args.val_every})")
     trainer.train()
 
     final_dir = out_dir / "final"
@@ -262,6 +320,9 @@ def main() -> None:
                     help="student LR; default = cfg.pq_lr (1e-05)")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="override cfg.pq_max_train_steps (default 200)")
+    ap.add_argument("--val-every", type=int, default=5,
+                    help="greedy-eval d_best/fail128_train/fail128_test every N "
+                         "trainer global_steps and log to wandb")
     ap.add_argument("--results-root", type=str, default="files/results/baselines")
     ap.add_argument("--wandb-project", type=str, default="soar-mini-pq")
     ap.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.15)
@@ -329,7 +390,9 @@ def main() -> None:
                 "n_d_best": len(d_best), "n_fail128_train": len(train_set)},
     )
 
-    final_lora = _train_pq_student(cfg, args, combined, out_dir)
+    final_lora = _train_pq_student(
+        cfg, args, combined, d_best, train_set, test_set, out_dir,
+    )
 
     eval_report = _run_eval_subprocess(cfg, final_lora, args)
 
