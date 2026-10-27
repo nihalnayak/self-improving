@@ -866,7 +866,7 @@ def main(cfg: SoarConfig) -> None:
             ma = (float(mean(promotions_window))
                   if len(promotions_window) == cfg.promotion_window
                   else -float("inf"))
-            if ma > cfg.promotion_threshold and n_promotions < cfg.max_promotions_to_track:
+            if ma > cfg.promotion_threshold:
                 k_star = int(max(range(g), key=lambda k: R_k[k]))
                 rewards_kstar = R_matrix[k_star]
                 sorted_j = sorted(range(r_parallel), key=lambda j: rewards_kstar[j])
@@ -1008,7 +1008,6 @@ def _parse_args():
 
     ap.add_argument("--promotion-threshold", type=float, default=None)
     ap.add_argument("--promotion-window", type=int, default=None)
-    ap.add_argument("--max-promotions-to-track", type=int, default=None)
 
     ap.add_argument("--vllm-gpu-memory-utilization", type=float, default=None)
     ap.add_argument("--vllm-max-model-len", type=int, default=None)

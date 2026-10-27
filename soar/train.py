@@ -286,8 +286,8 @@ def main(cfg: SoarConfig):
         _log(f"[step {outer_step}] (4) promotion-check: "
              f"window={len(promotions_window)}/{cfg.promotion_window} "
              f"MA={ma if ma != -float('inf') else 'n/a'} τ={cfg.promotion_threshold} "
-             f"total_promotions={n_promotions}/{cfg.max_promotions_to_track}")
-        if ma > cfg.promotion_threshold and n_promotions < cfg.max_promotions_to_track:
+             f"total_promotions={n_promotions}")
+        if ma > cfg.promotion_threshold:
             k_star = int(max(range(g), key=lambda k: R_k[k]))
             # Pick the median-reward run across the r parallel runs on X_{k*}.
             rewards_kstar = R_matrix[k_star]
@@ -479,7 +479,6 @@ def _parse_args():
     # promotion
     ap.add_argument("--promotion-threshold", type=float, default=None)
     ap.add_argument("--promotion-window", type=int, default=None)
-    ap.add_argument("--max-promotions-to-track", type=int, default=None)
 
     # vllm
     ap.add_argument("--vllm-gpu-memory-utilization", type=float, default=None)

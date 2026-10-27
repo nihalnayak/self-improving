@@ -42,7 +42,6 @@ class SoarConfig:
     # ---- promotion ----
     promotion_threshold: float = 0.01   # τ (paper)
     promotion_window: int = 3           # m (paper): moving-average window for teacher reward
-    max_promotions_to_track: int = 4    # paper observes a max of 4 promotions in practice
 
     # ---- vllm ----
     vllm_gpu_memory_utilization: float = 0.25
