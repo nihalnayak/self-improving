@@ -831,8 +831,9 @@ def main(cfg: SoarConfig) -> None:
                     run_idx += 1
                     t_run = time.time()
                     tag = f"o{outer_step}_k{k}_j{j}"
-                    effective_inner_steps = (
-                        cfg.inner_steps + cfg.inner_steps_per_promotion * n_promotions
+                    effective_inner_steps = min(
+                        cfg.inner_steps + cfg.inner_steps_per_promotion * n_promotions,
+                        30,
                     )
                     inner_stats, trained_dir, base_acc_run, trained_acc = _run_inner_grpo(
                         cfg, tok, X[k], tag, baseline_student_ckpt, cfg.out_dir, accel,
