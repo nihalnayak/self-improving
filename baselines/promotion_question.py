@@ -44,7 +44,7 @@ from vllm import LLM, SamplingParams
 
 from soar.config import SoarConfig
 from soar.data import MathProblem, _read_jsonl, load_fail128_split
-from soar.verify import score_math_answer, success_math_answer
+from soar.verify import pass_at_k, score_math_answer, success_math_answer
 
 
 # ------------- paper §B.1 prompt (identical to soar.train_single_gpu_trl_lora) -------------
@@ -87,41 +87,79 @@ class PeriodicValCallback(TrainerCallback):
     vLLM) on each named question set and log `pq/val/{name}_acc` to wandb.
     Scoring matches `eval.py` (boxed-equiv via `success_math_answer`), so the
     final `fail128_test` curve lines up with the post-training `pq/test_pass_at_1`.
+
+    Independently, every `pass_at_k_every` steps, draw `pass_at_k_samples`
+    completions on `pass_at_k_set_name` at T=`pass_at_k_temperature` and log
+    `pq/val/{name}_pass_at_{k}` for each k in `pass_at_k_ks` — matches the
+    paper's Table 3 metric so the in-training curve lines up with the final
+    post-training pass@k written by eval.py.
     """
 
-    def __init__(self, tok, questions_by_name, every, max_new_tokens):
+    def __init__(self, tok, questions_by_name, every, max_new_tokens,
+                 pass_at_k_every, pass_at_k_samples, pass_at_k_temperature,
+                 pass_at_k_set_name="fail128_test", pass_at_k_ks=(32,)):
         self.tok = tok
         self.questions = questions_by_name
         self.every = every
         self.max_new_tokens = max_new_tokens
+        self.pass_at_k_every = pass_at_k_every
+        self.pass_at_k_samples = pass_at_k_samples
+        self.pass_at_k_temperature = pass_at_k_temperature
+        self.pass_at_k_set_name = pass_at_k_set_name
+        self.pass_at_k_ks = tuple(pass_at_k_ks)
         self.trainer = None  # late-bound after GRPOTrainer construction
 
     def on_step_end(self, args, state, control, **kwargs):
         if self.trainer is None or state.global_step == 0:
             return
-        if state.global_step % self.every != 0:
+        do_greedy = state.global_step % self.every == 0
+        do_pass_at_k = state.global_step % self.pass_at_k_every == 0
+        if not (do_greedy or do_pass_at_k):
             return
         gen = getattr(self.trainer, "vllm_generation", None)
         if gen is None or getattr(gen, "llm", None) is None:
             return
         # TRL only syncs weights before each rollout; force latest LoRA.
         gen.sync_weights()
-        sp = SamplingParams(temperature=0.0, top_p=1.0,
-                            max_tokens=self.max_new_tokens)
-        metrics = {}
-        for name, qs in self.questions.items():
-            if not qs:
-                continue
-            prompts = [_student_prompt(q.problem) for q in qs]
-            outs = gen.llm.generate(prompts, sp, use_tqdm=False)
-            correct = sum(1.0 for o, q in zip(outs, qs)
-                          if success_math_answer(o.outputs[0].text, q.answer))
-            metrics[f"pq/val/{name}_acc"] = correct / len(qs)
-        if metrics:
-            print(f"[pq] step={state.global_step} val: "
-                  + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
-                              for k, v in metrics.items()))
-            wandb.log(metrics, step=state.global_step)
+        if do_greedy:
+            sp = SamplingParams(temperature=0.0, top_p=1.0,
+                                max_tokens=self.max_new_tokens)
+            metrics = {}
+            for name, qs in self.questions.items():
+                if not qs:
+                    continue
+                prompts = [_student_prompt(q.problem) for q in qs]
+                outs = gen.llm.generate(prompts, sp, use_tqdm=False)
+                correct = sum(1.0 for o, q in zip(outs, qs)
+                              if success_math_answer(o.outputs[0].text, q.answer))
+                metrics[f"pq/val/{name}_acc"] = correct / len(qs)
+            if metrics:
+                print(f"[pq] step={state.global_step} val: "
+                      + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
+                                  for k, v in metrics.items()))
+                wandb.log(metrics, step=state.global_step)
+        if do_pass_at_k:
+            qs = self.questions.get(self.pass_at_k_set_name, [])
+            if qs:
+                sp = SamplingParams(
+                    n=self.pass_at_k_samples,
+                    temperature=self.pass_at_k_temperature,
+                    top_p=1.0,
+                    max_tokens=self.max_new_tokens,
+                )
+                prompts = [_student_prompt(q.problem) for q in qs]
+                outs = gen.llm.generate(prompts, sp, use_tqdm=False)
+                completions_by_q = [[c.text for c in o.outputs] for o in outs]
+                golds = [q.answer for q in qs]
+                pk = pass_at_k(completions_by_q, golds, ks=self.pass_at_k_ks)
+                pk_metrics = {
+                    f"pq/val/{self.pass_at_k_set_name}_pass_at_{k}": v
+                    for k, v in pk.items()
+                }
+                print(f"[pq] step={state.global_step} val pass@k: "
+                      + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
+                                  for k, v in pk_metrics.items()))
+                wandb.log(pk_metrics, step=state.global_step)
 
 
 def _teardown_colocate_vllm(trainer) -> None:
@@ -247,6 +285,9 @@ def _train_pq_student(cfg: SoarConfig, args, combined: List[MathProblem],
         },
         every=args.val_every,
         max_new_tokens=cfg.pq_max_new_tokens,
+        pass_at_k_every=args.pass_at_k_every,
+        pass_at_k_samples=cfg.pq_pass_at_k_samples,
+        pass_at_k_temperature=cfg.pq_temperature,
     )
 
     print("[pq] constructing GRPOTrainer (enforce_eager patched)")
@@ -323,6 +364,10 @@ def main() -> None:
     ap.add_argument("--val-every", type=int, default=5,
                     help="greedy-eval d_best/fail128_train/fail128_test every N "
                          "trainer global_steps and log to wandb")
+    ap.add_argument("--pass-at-k-every", type=int, default=25,
+                    help="sample cfg.pq_pass_at_k_samples completions on fail128_test "
+                         "every N trainer global_steps and log "
+                         "pq/val/fail128_test_pass_at_32 to wandb")
     ap.add_argument("--results-root", type=str, default="files/results/baselines")
     ap.add_argument("--wandb-project", type=str, default="soar-mini-pq")
     ap.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.15)
