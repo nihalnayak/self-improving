@@ -34,9 +34,9 @@ _SET2 = sns.color_palette("Set2", 8)
 MARKER_CYCLE = ("o", "s", "D", "^", "v", "P", "X", "*")
 
 # Order the baselines appear in the legend (and get pinned colors).
-BASELINE_ORDER = ["PS", "PQ"]
-TAG_FULL_NAMES = {"PS": "Promoted Student", "PQ": "Promotion Question"}
-TAG_COLORS = {"PS": _SET2[0], "PQ": _SET2[1]}
+BASELINE_ORDER = ["PS", "PQ", "HO"]
+TAG_FULL_NAMES = {"PS": "Promoted Student", "PQ": "Promotion Question", "HO": "Hard Only"}
+TAG_COLORS = {"PS": _SET2[0], "PQ": _SET2[1], "HO": _SET2[2]}
 
 
 def load_records(results_root: Path, model_short: str) -> list[dict[str, Any]]:
@@ -78,6 +78,10 @@ def _make_label(tag: str, rec: dict[str, Any]) -> str:
         return f"PQ · {run_name}"
     if tag == "PS":
         return f"PS · {run_name}"
+    if tag == "HO":
+        lr = rec.get("lr")
+        seed = rec.get("seed")
+        return f"HO · lr={lr} · seed={seed}"
     return f"{tag} · {run_name}"
 
 
