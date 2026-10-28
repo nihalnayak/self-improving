@@ -97,7 +97,7 @@ class PeriodicValCallback(TrainerCallback):
 
     def __init__(self, tok, questions_by_name, every, max_new_tokens,
                  pass_at_k_every, pass_at_k_samples, pass_at_k_temperature,
-                 pass_at_k_set_name="fail128_test", pass_at_k_ks=(32,)):
+                 out_dir, pass_at_k_set_name="fail128_test", pass_at_k_ks=(32,)):
         self.tok = tok
         self.questions = questions_by_name
         self.every = every
@@ -107,6 +107,8 @@ class PeriodicValCallback(TrainerCallback):
         self.pass_at_k_temperature = pass_at_k_temperature
         self.pass_at_k_set_name = pass_at_k_set_name
         self.pass_at_k_ks = tuple(pass_at_k_ks)
+        self.out_dir = Path(out_dir)
+        self.val_log_path = self.out_dir / "val_metrics.jsonl"
         self.trainer = None  # late-bound after GRPOTrainer construction
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -137,7 +139,12 @@ class PeriodicValCallback(TrainerCallback):
                 print(f"[pq] step={state.global_step} val: "
                       + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
                                   for k, v in metrics.items()))
-                wandb.log(metrics, step=state.global_step)
+                # Use train/global_step as the x-axis (step_sync=True is set
+                # by HF's WandbCallback) — passing step= here is dropped as
+                # non-monotonic since TRL has advanced wandb's internal _step.
+                wandb.log({**metrics, "train/global_step": state.global_step})
+                with self.val_log_path.open("a") as f:
+                    f.write(json.dumps({"step": state.global_step, **metrics}) + "\n")
         if do_pass_at_k:
             qs = self.questions.get(self.pass_at_k_set_name, [])
             if qs:
@@ -159,7 +166,9 @@ class PeriodicValCallback(TrainerCallback):
                 print(f"[pq] step={state.global_step} val pass@k: "
                       + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
                                   for k, v in pk_metrics.items()))
-                wandb.log(pk_metrics, step=state.global_step)
+                wandb.log({**pk_metrics, "train/global_step": state.global_step})
+                with self.val_log_path.open("a") as f:
+                    f.write(json.dumps({"step": state.global_step, **pk_metrics}) + "\n")
 
 
 def _teardown_colocate_vllm(trainer) -> None:
@@ -288,6 +297,7 @@ def _train_pq_student(cfg: SoarConfig, args, combined: List[MathProblem],
         pass_at_k_every=args.pass_at_k_every,
         pass_at_k_samples=cfg.pq_pass_at_k_samples,
         pass_at_k_temperature=cfg.pq_temperature,
+        out_dir=out_dir,
     )
 
     print("[pq] constructing GRPOTrainer (enforce_eager patched)")
@@ -371,6 +381,8 @@ def main() -> None:
     ap.add_argument("--results-root", type=str, default="files/results/baselines")
     ap.add_argument("--wandb-project", type=str, default="soar-mini-pq")
     ap.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.15)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="override cfg.seed; seeds random/torch and GRPOConfig")
     args = ap.parse_args()
 
     soar_run = Path(args.soar_run)
@@ -389,6 +401,8 @@ def main() -> None:
         args.lr = cfg.pq_lr
     if args.max_steps is None:
         args.max_steps = cfg.pq_max_train_steps
+    if args.seed is not None:
+        cfg.seed = args.seed
 
     # torchrun env defaults so TRL's colocate vLLM can bring up its distributed
     # groups under `accelerate launch --num_processes 1`.
@@ -451,6 +465,7 @@ def main() -> None:
         "model_short": model_short,
         "lr": args.lr,
         "max_steps": args.max_steps,
+        "seed": cfg.seed,
         "n_d_best": len(d_best),
         "n_fail128_train": len(train_set),
         "lora_path": str(final_lora),
