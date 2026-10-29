@@ -1,4 +1,4 @@
-"""SOAR training loop — single-GPU + dual-LoRA (teacher + student) + TRL GRPO + colocate vLLM.
+"""SOAR training loop — single-GPU + dual-LoRA (teacher + student) + TRL RLOO/GRPO + colocate vLLM.
 
 Launch:
     accelerate launch --num_processes=1 -m soar.train_single_gpu_trl_lora \
@@ -18,7 +18,8 @@ Six phases per outer step (SOAR Alg. 1), identical schema to train_trl.py:
        from `_scratch/teacher/` (merged teacher weights, see phase 5).
     2. SAMPLE Q_R (baseline eval runs inside the first inner trainer).
     3. INNER TRAINING: for each (X_k, j in 1..r), build a fresh student_model
-       from `_scratch/baseline_student/`, wrap in LoRA via TRL, run GRPOTrainer.
+       from `_scratch/baseline_student/`, wrap in LoRA via TRL, run
+       RLOOTrainer / GRPOTrainer (selected by cfg.rl_algo).
        KL ref = base model with LoRA disabled (TRL handles automatically when
        `peft_config` is passed and `ref_model=None`). After training, merge the
        student adapter and save merged HF layout to `_scratch/trained_oS_kK_jJ/`.
@@ -57,7 +58,7 @@ import wandb
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import GRPOConfig, GRPOTrainer
+from trl import GRPOConfig, GRPOTrainer, RLOOConfig, RLOOTrainer
 from peft import LoraConfig, PeftModel, get_peft_model
 
 from eval import run_vllm_eval
@@ -163,6 +164,31 @@ def _append_promotion_questions(out_dir: str, promotion_idx: int,
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
 
 
+def _save_teacher_outer_data(
+    out_dir: str, outer_step: int,
+    X: List[List[MathProblem]], R_k: List[float],
+    promoted_k_star: Optional[int],
+) -> None:
+    """One jsonl per group under teacher_data/outer_{step:04d}/.
+
+    Filename encodes group reward and promotion status so `ls` is enough
+    to see which splits were strongest. Overwrite mode so re-running an
+    outer step produces a clean file.
+    """
+    step_dir = Path(out_dir) / "teacher_data" / f"outer_{outer_step:04d}"
+    step_dir.mkdir(parents=True, exist_ok=True)
+    for k, problems in enumerate(X):
+        suffix = "_PROMOTED" if promoted_k_star == k else ""
+        fname = f"k{k}_R{R_k[k]:+.4f}{suffix}.jsonl"
+        with open(step_dir / fname, "w") as f:
+            for p in problems:
+                d = asdict(p)
+                d["outer_step"] = outer_step
+                d["k"] = k
+                d["R_k"] = float(R_k[k])
+                f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+
 def _save_merged_teacher(peft_model, tok, path: Path) -> None:
     """Merge teacher LoRA → save clean HF layout → unmerge.
 
@@ -201,7 +227,7 @@ def _save_peft_student_adapter(trainer, trained_dir: Path) -> None:
 
 # ------------- memory diagnostics (opt-in: SOAR_MEM_DEBUG=1) -------------
 #
-# Why: suspected GPU leak after inner GRPO runs. Env-var gated so prod runs are
+# Why: suspected GPU leak after inner RLOO runs. Env-var gated so prod runs are
 # untouched. Enable with SOAR_MEM_DEBUG=1; dump a snapshot every N outer steps
 # with SOAR_MEM_SNAPSHOT_EVERY=N (opens in https://pytorch.org/memory_viz).
 _MEM_DEBUG = os.environ.get("SOAR_MEM_DEBUG", "0") == "1"
@@ -357,7 +383,7 @@ def _generate_teacher_batch_vllm(
     return accepted_raw, accepted_problems, total_generated
 
 
-# ------------- inner loop: TRL GRPO with student LoRA via peft_config -------------
+# ------------- inner loop: TRL RLOO with student LoRA via peft_config -------------
 
 from unittest.mock import patch
 from vllm import LLM
@@ -369,14 +395,14 @@ def eager_llm_init(self, *args, **kwargs):
     return original_llm_init(self, *args, **kwargs)
 
 
-def _run_inner_grpo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
+def _run_inner_rloo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
                     baseline_ckpt_dir: Path, out_dir: str,
                     accel: Accelerator,
                     *, inner_steps: Optional[int] = None,
                     eval_questions: Optional[List[MathProblem]] = None,
                     eval_baseline: bool = False,
                     ) -> Tuple[dict, Path, Optional[float], Optional[float]]:
-    """One SOAR inner training run on X_k via TRL GRPOTrainer with LoRA student.
+    """One SOAR inner training run on X_k via TRL RLOOTrainer with LoRA student.
 
     `cfg.use_lora` is forced True at main() entry, so TRL always receives a
     `peft_config`, sets ref_model=None, and uses `disable_adapter()` for KL —
@@ -437,16 +463,17 @@ def _run_inner_grpo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
             f"with per_device_train_batch_size={pdt} x num_processes={N} = {denom}."
         )
     grad_accum = total_sequences_per_step // denom
-    _log(accel, f"  [grpo] B={B} G={G} N={N} pdt={pdt} grad_accum={grad_accum} "
+    _log(accel, f"  [{cfg.rl_algo}] B={B} G={G} N={N} pdt={pdt} grad_accum={grad_accum} "
                 f"(prompts/step={B}, seqs/step={B*G})")
 
-    # TRL 1.16 dropped `max_prompt_length` from GRPOConfig; prompt truncation is
-    # now handled implicitly by `vllm_max_model_length` (renamed from
-    # `vllm_max_model_len`). `scale_rewards` moved from bool → str.
-    args = GRPOConfig(
+    # TRL 1.16 dropped `max_prompt_length` from both RLOOConfig and GRPOConfig;
+    # prompt truncation is now handled implicitly by `vllm_max_model_length`
+    # (renamed from `vllm_max_model_len`). RLOO's `normalize_advantages=False`
+    # (TRL default) and GRPO's `scale_rewards=False` both keep the raw
+    # leave-one-out / group-relative advantages the SOAR paper uses.
+    common_kwargs = dict(
         output_dir=str(Path(out_dir) / "_trl" / tag),
         num_generations=G,
-        scale_rewards="none",
         beta=cfg.kl_beta,
         learning_rate=cfg.student_lr,
         lr_scheduler_type="cosine",
@@ -469,6 +496,12 @@ def _run_inner_grpo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
         seed=cfg.seed,
         disable_tqdm=True,
     )
+    if cfg.rl_algo == "grpo":
+        args = GRPOConfig(scale_rewards=False, **common_kwargs)
+        TrainerCls = GRPOTrainer
+    else:
+        args = RLOOConfig(**common_kwargs)
+        TrainerCls = RLOOTrainer
     peft_config = LoraConfig(
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
@@ -477,18 +510,10 @@ def _run_inner_grpo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
         bias="none",
         task_type="CAUSAL_LM",
     )
-    # trainer = GRPOTrainer(
-    #     model=student_model,
-    #     reward_funcs=reward_fn,
-    #     args=args,
-    #     train_dataset=ds,
-    #     processing_class=tok,
-    #     peft_config=peft_config,
-    # )
     log_mem("before trainer construction")
     # Patch only while TRL constructs its colocated engine.
     with patch.object(LLM, "__init__", eager_llm_init):
-        trainer = GRPOTrainer(
+        trainer = TrainerCls(
             model=student_model,
             reward_funcs=reward_fn,
             args=args,
@@ -716,11 +741,12 @@ def main(cfg: SoarConfig) -> None:
     # File advertises dual-LoRA; force on so the student path can't silently
     # fall back to full-parameter training.
     cfg.use_lora = True
+    assert cfg.rl_algo in ("rloo", "grpo"), f"bad rl_algo={cfg.rl_algo!r}"
 
     # TRL colocate vLLM uses `distributed_executor_backend='external_launcher'`,
     # which reads torchrun-style env vars in uniproc_executor._distributed_args.
     # `accelerate launch --num_processes 1` goes through simple_launcher and
-    # does NOT set them, so GRPOTrainer init crashes with KeyError: 'RANK'.
+    # does NOT set them, so RLOOTrainer init crashes with KeyError: 'RANK'.
     # Fill in single-process defaults (setdefault leaves torchrun values alone).
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("LOCAL_RANK", "0")
@@ -778,7 +804,12 @@ def main(cfg: SoarConfig) -> None:
     _save_merged_teacher(accel.unwrap_model(teacher_model), tok, teacher_ckpt)
 
     if accel.is_main_process:
-        wandb.init(project=cfg.wandb_project, mode=cfg.wandb_mode, config=cfg.__dict__)
+        wandb.init(
+            project=cfg.wandb_project,
+            mode=cfg.wandb_mode,
+            name=Path(cfg.out_dir).name,
+            config=cfg.__dict__,
+        )
 
     promotions_window: deque = deque(maxlen=cfg.promotion_window)
     n_promotions = 0
@@ -852,7 +883,7 @@ def main(cfg: SoarConfig) -> None:
                     cfg.inner_steps + cfg.inner_steps_per_promotion * n_promotions,
                     30,
                 )
-                inner_stats, trained_dir, base_acc_run, trained_acc = _run_inner_grpo(
+                inner_stats, trained_dir, base_acc_run, trained_acc = _run_inner_rloo(
                     cfg, tok, X[k], tag, baseline_student_ckpt, cfg.out_dir, accel,
                     inner_steps=effective_inner_steps,
                     eval_questions=Q_R,
@@ -906,6 +937,12 @@ def main(cfg: SoarConfig) -> None:
             promoted_this_step = 1
             _log(accel, f"[step {outer_step}] PROMOTED "
                         f"(k*={k_star}, j*={j_star}, MA={ma:+.3f})")
+
+        if accel.is_main_process:
+            _save_teacher_outer_data(
+                cfg.out_dir, outer_step, X, R_k,
+                promoted_k_star=(k_star if promoted_this_step else None),
+            )
 
         # ----- 5. TEACHER RLOO UPDATE (KL ref via disable_adapter) -----
         t_phase = time.time()
@@ -1036,6 +1073,7 @@ def _parse_args():
 
     ap.add_argument("--kl-beta", type=float, default=None)
     ap.add_argument("--max-prompt-len", type=int, default=None)
+    ap.add_argument("--rl-algo", type=str, choices=("rloo", "grpo"), default=None)
 
     ap.add_argument("--promotion-threshold", type=float, default=None)
     ap.add_argument("--promotion-window", type=int, default=None)

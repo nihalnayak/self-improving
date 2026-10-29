@@ -22,14 +22,14 @@ class SoarConfig:
     inner_dataset_size: int = 64        # n: problems per dataset X_k (paper uses 64)
     r_parallel_students: int = 1        # r: parallel student runs per dataset (paper uses 4)
     teacher_lr: float = 1e-5            # paper uses 1e-5
-    teacher_max_new_tokens: int = 512
+    teacher_max_new_tokens: int = 1024  # paper uses 512
     teacher_temperature: float = 1.0
     teacher_rejection_cap: int = 16      # safety cap on rejection sampling multiplier
 
     # ---- inner loop (student) ----
     inner_steps: int = 10               # K: student RLOO steps per X_k (paper)
     inner_steps_per_promotion: int = 5  # paper B.7: "+5 steps" per promotion stage
-    student_group_size: int = 8         # G: completions per prompt (paper uses 32)
+    student_group_size: int = 32         # G: completions per prompt (paper uses 32)
     student_batch_problems: int = 8     # B: paper's batch size (prompts per gradient step)
     student_lr: float = 1e-5            # paper uses 1e-5
     student_max_new_tokens: int = 1024  # matches fail@128 token budget
@@ -38,6 +38,7 @@ class SoarConfig:
     # ---- rl ----
     kl_beta: float = 0.02
     max_prompt_len: int = 1024
+    rl_algo: str = "rloo"               # {"rloo", "grpo"}: inner-loop student trainer
 
     # ---- promotion ----
     promotion_threshold: float = 0.01   # τ (paper)
