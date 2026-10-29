@@ -17,6 +17,7 @@ class MathProblem:
     solution: str = ""    # optional full solution (from the source dataset)
     level: str = ""       # optional difficulty label (e.g. "Level 5")
     subject: str = ""     # optional topic (e.g. "Algebra")
+    idx: int = -1         # position in source dataset (-1 if unknown)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -30,6 +31,7 @@ class MathProblem:
             solution=d.get("solution", ""),
             level=d.get("level", ""),
             subject=d.get("subject", ""),
+            idx=int(d.get("idx", -1)),
         )
 
 

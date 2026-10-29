@@ -53,7 +53,7 @@ _MATH_CONFIGS = (
 )
 
 
-def _row_to_math_problem(row: dict) -> Optional[MathProblem]:
+def _row_to_math_problem(row: dict, idx: int) -> Optional[MathProblem]:
     """Convert one EleutherAI/hendrycks_math row to a MathProblem.
     Returns None only if the \\boxed{} answer can't be extracted."""
     problem = row["problem"]
@@ -69,23 +69,30 @@ def _row_to_math_problem(row: dict) -> Optional[MathProblem]:
         solution=solution,
         level=str(row["level"]),
         subject=row["type"],
+        idx=idx,
     )
 
 
 def load_math_test_split() -> List[MathProblem]:
     """Load the full 5000-problem MATH test split from EleutherAI/hendrycks_math by
-    concatenating per-subject configs."""
+    concatenating per-subject configs. Each row carries an `idx` in [0, 5000) that
+    tags its position in the concatenated test set (skipped rows still burn their
+    index slot so `idx` uniquely identifies the source row)."""
     out: List[MathProblem] = []
     skipped = 0
+    global_idx = 0
     for cfg in _MATH_CONFIGS:
         print(f"[data] loading {_MATH_REPO} config={cfg} split=test")
         ds = load_dataset(_MATH_REPO, cfg, split="test")
+        if "idx" not in ds.column_names:
+            ds = ds.add_column("idx", list(range(global_idx, global_idx + len(ds))))
         for row in ds:
-            p = _row_to_math_problem(row)
+            p = _row_to_math_problem(row, int(row["idx"]))
             if p is None:
                 skipped += 1
                 continue
             out.append(p)
+        global_idx += len(ds)
     print(f"[data] loaded {len(out)} problems across {len(_MATH_CONFIGS)} configs "
           f"(skipped {skipped})")
     if len(out) != 5000:
@@ -106,7 +113,6 @@ def build_fail128(args):
         print(f"[data] limited to {len(problems)} problems (--limit-problems)")
     n_source = len(problems)
 
-    # Tokenizer only used to set pad token; the student prompt is plain-text (not chat template).
     tok = AutoTokenizer.from_pretrained(args.base_model)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
@@ -202,7 +208,8 @@ def _parse_args():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--max-tokens", type=int, default=1024)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=42,
+                    help="paper §5.1: must differ from training/eval --seed")
     ap.add_argument("--limit-problems", type=int, default=0,
                     help="If >0, only process the first N problems (smoke test).")
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
