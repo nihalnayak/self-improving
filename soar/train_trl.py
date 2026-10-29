@@ -108,6 +108,7 @@ GRPOTrainer._move_model_to_vllm = _fsdp_safe_move_model_to_vllm
 
 from soar.config import SoarConfig, smoke_config
 from soar.data import MathProblem, load_fail128_split
+from soar.models import student_chat_prompt
 from soar.rloo import _per_token_logp, rloo_advantages, tokenize_rollouts
 from soar.teacher import parse_teacher_output
 from soar.verify import score_math_answer, success_math_answer
@@ -136,15 +137,6 @@ TEACHER_PROMPT = (
     "Begin now:"
 )
 
-STUDENT_PROMPT_TEMPLATE = (
-    "A conversation between User and Assistant. The user asks a question, and the Assistant "
-    "solves it. The assistant first shows the complete reasoning process step by step, then "
-    "provides the final answer in \\boxed{} format: 'User: [question] Assistant: [detailed "
-    "reasoning] The final answer is: \\boxed{[answer]}.\n"
-    "User: <QUESTION> Assistant: "
-)
-
-
 def _chat_prompt(tok, user_msg: str) -> str:
     """Wrap `user_msg` with the model's chat template + assistant-start token.
     Used for the teacher turn (teacher follows the base model's chat format)."""
@@ -153,13 +145,6 @@ def _chat_prompt(tok, user_msg: str) -> str:
         tokenize=False,
         add_generation_prompt=True,
     )
-
-
-def _student_prompt(question: str) -> str:
-    """Paper's self-contained student conversation template (NOT the model's chat
-    template). Fed as plain text to vLLM / tokenizer; trailing "Assistant: " primes
-    the completion."""
-    return STUDENT_PROMPT_TEMPLATE.replace("<QUESTION>", question)
 
 
 # ------------- accelerator / logging helpers -------------
@@ -374,7 +359,7 @@ def _eval_via_trainer_llm(cfg: SoarConfig, trainer, tok,
     from vllm import SamplingParams
 
     local_qs = questions[accel.process_index::accel.num_processes]
-    local_prompts = [_student_prompt(q.problem) for q in local_qs]
+    local_prompts = [student_chat_prompt(tok, q.problem) for q in local_qs]
     sp = SamplingParams(temperature=0.0, top_p=1.0,
                         max_tokens=cfg.student_max_new_tokens)
     if local_prompts:
@@ -465,16 +450,9 @@ def _run_inner_grpo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
     (stats, trained_dir, base_acc_or_None, trained_acc_or_None).
     """
     n_steps = inner_steps if inner_steps is not None else cfg.inner_steps
-    # TRL's GRPOTrainer tokenizes the "prompt" field directly, so pre-apply the
-    # model's chat template around the paper's student prompt (used verbatim as
-    # the user message) so training inputs match the tokenizer's expected format.
     ds = datasets.Dataset.from_list([
         {
-            "prompt": tok.apply_chat_template(
-                [{"role": "user", "content": _student_prompt(p.problem)}],
-                tokenize=False,
-                add_generation_prompt=True,
-            ),
+            "prompt": student_chat_prompt(tok, p.problem),
             "answer": p.answer,
         }
         for p in X_k

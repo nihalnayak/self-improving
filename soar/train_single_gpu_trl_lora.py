@@ -60,8 +60,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
 from peft import LoraConfig, PeftModel, get_peft_model
 
+from eval import run_vllm_eval
 from soar.config import SoarConfig, smoke_config
 from soar.data import MathProblem, load_fail128_split
+from soar.models import student_chat_prompt
 from soar.rloo import _per_token_logp, rloo_advantages, tokenize_rollouts
 from soar.teacher import parse_teacher_output
 from soar.verify import score_math_answer, success_math_answer
@@ -88,25 +90,12 @@ TEACHER_PROMPT = (
     "Begin now:"
 )
 
-STUDENT_PROMPT_TEMPLATE = (
-    "A conversation between User and Assistant. The user asks a question, and the Assistant "
-    "solves it. The assistant first shows the complete reasoning process step by step, then "
-    "provides the final answer in \\boxed{} format: 'User: [question] Assistant: [detailed "
-    "reasoning] The final answer is: \\boxed{[answer]}.\n"
-    "User: <QUESTION> Assistant: "
-)
-
-
 def _chat_prompt(tok, user_msg: str) -> str:
     return tok.apply_chat_template(
         [{"role": "user", "content": user_msg}],
         tokenize=False,
         add_generation_prompt=True,
     )
-
-
-def _student_prompt(question: str) -> str:
-    return STUDENT_PROMPT_TEMPLATE.replace("<QUESTION>", question)
 
 
 # ------------- accelerator / logging helpers -------------
@@ -318,63 +307,21 @@ def _vllm_generate_once(
     return texts
 
 
-def _eval_via_trainer_hf(cfg: SoarConfig, trainer, tok,
-                         questions: List[MathProblem]) -> float:
-    """Greedy-score `questions` via HF generate on trainer.model (vLLM disabled)."""
-    model = trainer.accelerator.unwrap_model(trainer.model)
-    was_training = model.training
-    model.eval()
-    device = next(model.parameters()).device
-    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    prev_side = tok.padding_side
-    tok.padding_side = "left"
-    correct = 0.0
-    batch_size = max(1, cfg.student_batch_problems)
-    try:
-        for i in range(0, len(questions), batch_size):
-            batch = questions[i:i + batch_size]
-            prompts = [_student_prompt(q.problem) for q in batch]
-            inputs = tok(prompts, return_tensors="pt", padding=True).to(device)
-            with torch.no_grad():
-                out = model.generate(
-                    **inputs,
-                    max_new_tokens=cfg.student_max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=pad_id,
-                )
-            new_tokens = out[:, inputs["input_ids"].shape[1]:]
-            texts = tok.batch_decode(new_tokens, skip_special_tokens=True)
-            for text, q in zip(texts, batch):
-                if success_math_answer(text, q.answer):
-                    correct += 1.0
-    finally:
-        tok.padding_side = prev_side
-        if was_training:
-            model.train()
-    total = float(len(questions))
-    return float(correct / total) if total > 0 else 0.0
-
-
 def _eval_via_trainer_llm(cfg: SoarConfig, trainer, tok,
                           questions: List[MathProblem]) -> float:
-    """Greedy-score `questions`. Uses the colocate vLLM when present, else HF generate."""
-    # TRL 1.16: colocate engine lives at `trainer.vllm_generation.llm`
-    # (was `trainer.llm` in 0.19.x).
+    """Greedy-score `questions` via the colocate vLLM engine (merged LoRA)."""
+    # TRL 1.16: colocate engine lives at `trainer.vllm_generation.llm`.
     gen = getattr(trainer, "vllm_generation", None)
-    if gen is None or getattr(gen, "llm", None) is None:
-        return _eval_via_trainer_hf(cfg, trainer, tok, questions)
-    from vllm import SamplingParams
-
-    prompts = [_student_prompt(q.problem) for q in questions]
-    sp = SamplingParams(temperature=0.0, top_p=1.0,
-                        max_tokens=cfg.student_max_new_tokens)
-    outputs = gen.llm.generate(prompts, sp, use_tqdm=False)
-    correct = sum(
-        1.0 for o, q in zip(outputs, questions)
-        if success_math_answer(o.outputs[0].text, q.answer)
+    assert gen is not None and getattr(gen, "llm", None) is not None, (
+        "colocate vLLM engine required for _eval_via_trainer_llm"
     )
-    total = float(len(questions))
-    return float(correct / total) if total > 0 else 0.0
+    pk = run_vllm_eval(
+        gen.llm, questions, tok,
+        temperature=0.0, n_samples=1,
+        max_new_tokens=cfg.student_max_new_tokens, ks=(1,),
+        seed=cfg.seed,
+    )
+    return pk["1"]
 
 
 def _generate_teacher_batch_vllm(
@@ -451,11 +398,7 @@ def _run_inner_grpo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
     n_steps = inner_steps if inner_steps is not None else cfg.inner_steps
     ds = datasets.Dataset.from_list([
         {
-            "prompt": tok.apply_chat_template(
-                [{"role": "user", "content": _student_prompt(p.problem)}],
-                tokenize=False,
-                add_generation_prompt=True,
-            ),
+            "prompt": student_chat_prompt(tok, p.problem),
             "answer": p.answer,
         }
         for p in X_k

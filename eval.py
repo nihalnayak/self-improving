@@ -4,6 +4,14 @@ Metric is the paper's unbiased pass@k estimator (SOAR §4.3; Chen et al. 2021),
 computed in `soar.verify.pass_at_k`. For a single greedy run at T=0 just pass
 `--n-samples 1 --temperature 0.0 --ks 1`.
 
+Exposes `run_vllm_eval(engine, questions, tok, *, temperature, n_samples,
+max_new_tokens, ks, seed, lora_path=None)` for every vLLM-based student eval in
+the repo (HO/PQ val callbacks, promoted_student scorer, single-GPU TRL eval,
+and this script's main()). `seed` MUST differ from the fail@128 filter seed
+(SOAR §5.1: *"stochastic sampling with different seeds than were used for the
+initial fail@128 filtering"*). Filter default is 42; training/eval seeds are
+0/1/2 per the sweep, so they're disjoint by construction.
+
 Usage:
     python eval.py                                           # base model, pass@{1,4,8,16,32}
     python eval.py --student_lora runs/.../promo_003/student # chosen student LoRA
@@ -12,17 +20,69 @@ Usage:
 """
 
 import argparse
+import itertools
 import json
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from vllm import SamplingParams
+from vllm.lora.request import LoRARequest
 
 from soar.config import SoarConfig
-from soar.data import load_fail128_split
+from soar.data import MathProblem, load_fail128_split
 from soar.models import load_vllm_engine, student_chat_prompt
-from soar.rollout import vllm_generate
 from soar.verify import pass_at_k
 from transformers import AutoTokenizer
+
+
+_FAIL128_FILTER_SEED = 42  # must stay in sync with misc/build_fail128.py default
+_LORA_EVAL_COUNTER = itertools.count(10_000_000)
+
+
+def run_vllm_eval(
+    engine,
+    questions: List[MathProblem],
+    tok,
+    *,
+    temperature: float,
+    n_samples: int,
+    max_new_tokens: int,
+    ks: Tuple[int, ...] = (1,),
+    seed: int,
+    lora_path: Optional[str] = None,
+) -> Dict[str, float]:
+    """Chat-template `questions`, draw `n_samples` completions each at
+    `temperature` with vLLM `SamplingParams(seed=seed)`, score, return
+    `{str(k): pass@k}` for each k.
+
+    `seed` must differ from the fail@128 filter seed (paper §5.1). Callers
+    forward their training/eval script's own `--seed` verbatim.
+
+    If `lora_path` is set, applies the adapter via `LoRARequest` (fresh vLLM
+    with `enable_lora=True`). If `None`, generates from the engine as-is —
+    covers both base-model eval and the TRL colocate engine (where
+    `sync_weights()` has already merged the LoRA into base params).
+    """
+    assert seed != _FAIL128_FILTER_SEED, (
+        f"eval seed {seed} collides with fail@128 filter seed; see SOAR §5.1"
+    )
+    prompts = [student_chat_prompt(tok, q.problem) for q in questions]
+    sp = SamplingParams(
+        n=n_samples, temperature=temperature, top_p=1.0,
+        max_tokens=max_new_tokens, seed=seed,
+    )
+    kw = {}
+    if lora_path is not None:
+        kw["lora_request"] = LoRARequest(
+            lora_name="student",
+            lora_int_id=next(_LORA_EVAL_COUNTER),
+            lora_path=lora_path,
+        )
+    outs = engine.generate(prompts, sp, use_tqdm=False, **kw)
+    completions_by_q = [[c.text for c in o.outputs] for o in outs]
+    golds = [q.answer for q in questions]
+    pk = pass_at_k(completions_by_q, golds, ks=ks)
+    return {str(k): v for k, v in pk.items()}
 
 
 def main():
@@ -34,7 +94,8 @@ def main():
                     help="paper Table 3 default = 1.0")
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--limit", type=int, default=0, help="truncate test set for a quick run")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="vLLM SamplingParams seed; MUST differ from fail@128 filter seed (42)")
     ap.add_argument("--student_lora", type=str, default=None,
                     help="path to a PEFT adapter dir; if None, eval base model")
     ap.add_argument("--ks", type=str, default="1,4,8,16,32",
@@ -56,30 +117,13 @@ def main():
         tok.pad_token = tok.eos_token
 
     engine = load_vllm_engine(cfg)
-    prompts = [student_chat_prompt(tok, q.problem) for q in test]
-    golds = [q.answer for q in test]
-
-    if args.student_lora is None:
-        sp = SamplingParams(
-            n=args.n_samples, temperature=args.temperature, top_p=1.0,
-            max_tokens=args.max_tokens, seed=args.seed,
-        )
-        outs = engine.generate(prompts, sp, use_tqdm=False)
-        completions_by_q = [[c.text for c in o.outputs] for o in outs]
-    else:
-        # vllm_generate yields one completion per prompt; repeat prompts to get N samples.
-        rep_prompts = [p for p in prompts for _ in range(args.n_samples)]
-        flat = vllm_generate(
-            engine, rep_prompts, lora_path=args.student_lora, lora_name="student",
-            max_new_tokens=args.max_tokens, temperature=args.temperature,
-        )
-        completions_by_q = [
-            flat[i * args.n_samples:(i + 1) * args.n_samples] for i in range(len(test))
-        ]
-
-    pk = pass_at_k(completions_by_q, golds, ks=ks)
-    pk_str = {str(k): v for k, v in pk.items()}
-    print("[eval] pass@k = " + ", ".join(f"{k}:{v:.4f}" for k, v in pk.items()))
+    pk_str = run_vllm_eval(
+        engine, test, tok,
+        temperature=args.temperature, n_samples=args.n_samples,
+        max_new_tokens=args.max_tokens, ks=ks, seed=args.seed,
+        lora_path=args.student_lora,
+    )
+    print("[eval] pass@k = " + ", ".join(f"{k}:{float(v):.4f}" for k, v in pk_str.items()))
 
     if args.output_json:
         report = {

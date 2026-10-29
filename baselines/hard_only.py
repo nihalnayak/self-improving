@@ -36,24 +36,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 from vllm import LLM, SamplingParams
 
+from eval import run_vllm_eval
 from soar.config import SoarConfig
 from soar.data import MathProblem, load_fail128_split
-from soar.verify import pass_at_k, score_math_answer, success_math_answer
-
-
-# ------------- paper §B.1 prompt (identical to soar.train_single_gpu_trl_lora) -------------
-
-STUDENT_PROMPT_TEMPLATE = (
-    "A conversation between User and Assistant. The user asks a question, and the Assistant "
-    "solves it. The assistant first shows the complete reasoning process step by step, then "
-    "provides the final answer in \\boxed{} format: 'User: [question] Assistant: [detailed "
-    "reasoning] The final answer is: \\boxed{[answer]}.\n"
-    "User: <QUESTION> Assistant: "
-)
-
-
-def _student_prompt(question: str) -> str:
-    return STUDENT_PROMPT_TEMPLATE.replace("<QUESTION>", question)
+from soar.models import student_chat_prompt
+from soar.verify import score_math_answer
 
 
 # vLLM LLM.__init__ patch so TRL's colocate engine uses enforce_eager
@@ -81,7 +68,7 @@ class PeriodicValCallback(TrainerCallback):
 
     def __init__(self, tok, questions_by_name, every, max_new_tokens,
                  pass_at_k_every, pass_at_k_samples, pass_at_k_temperature,
-                 out_dir, pass_at_k_set_name="fail128_test", pass_at_k_ks=(32,)):
+                 out_dir, seed, pass_at_k_set_name="fail128_test", pass_at_k_ks=(32,)):
         self.tok = tok
         self.questions = questions_by_name
         self.every = every
@@ -93,6 +80,7 @@ class PeriodicValCallback(TrainerCallback):
         self.pass_at_k_ks = tuple(pass_at_k_ks)
         self.out_dir = Path(out_dir)
         self.val_log_path = self.out_dir / "val_metrics.jsonl"
+        self.seed = seed
         self.trainer = None  # late-bound after GRPOTrainer construction
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -108,17 +96,17 @@ class PeriodicValCallback(TrainerCallback):
         # TRL only syncs weights before each rollout; force latest LoRA.
         gen.sync_weights()
         if do_greedy:
-            sp = SamplingParams(temperature=0.0, top_p=1.0,
-                                max_tokens=self.max_new_tokens)
             metrics = {}
             for name, qs in self.questions.items():
                 if not qs:
                     continue
-                prompts = [_student_prompt(q.problem) for q in qs]
-                outs = gen.llm.generate(prompts, sp, use_tqdm=False)
-                correct = sum(1.0 for o, q in zip(outs, qs)
-                              if success_math_answer(o.outputs[0].text, q.answer))
-                metrics[f"ho/val/{name}_acc"] = correct / len(qs)
+                pk = run_vllm_eval(
+                    gen.llm, qs, self.tok,
+                    temperature=0.0, n_samples=1,
+                    max_new_tokens=self.max_new_tokens, ks=(1,),
+                    seed=self.seed,
+                )
+                metrics[f"ho/val/{name}_acc"] = pk["1"]
             if metrics:
                 print(f"[ho] step={state.global_step} val: "
                       + "  ".join(f"{k.split('/')[-1]}={v:.3f}"
@@ -132,17 +120,14 @@ class PeriodicValCallback(TrainerCallback):
         if do_pass_at_k:
             qs = self.questions.get(self.pass_at_k_set_name, [])
             if qs:
-                sp = SamplingParams(
-                    n=self.pass_at_k_samples,
+                pk = run_vllm_eval(
+                    gen.llm, qs, self.tok,
                     temperature=self.pass_at_k_temperature,
-                    top_p=1.0,
-                    max_tokens=self.max_new_tokens,
+                    n_samples=self.pass_at_k_samples,
+                    max_new_tokens=self.max_new_tokens,
+                    ks=self.pass_at_k_ks,
+                    seed=self.seed,
                 )
-                prompts = [_student_prompt(q.problem) for q in qs]
-                outs = gen.llm.generate(prompts, sp, use_tqdm=False)
-                completions_by_q = [[c.text for c in o.outputs] for o in outs]
-                golds = [q.answer for q in qs]
-                pk = pass_at_k(completions_by_q, golds, ks=self.pass_at_k_ks)
                 pk_metrics = {
                     f"ho/val/{self.pass_at_k_set_name}_pass_at_{k}": v
                     for k, v in pk.items()
@@ -231,11 +216,7 @@ def _train_ho_student(cfg: SoarConfig, args, combined: List[MathProblem],
 
     ds = datasets.Dataset.from_list([
         {
-            "prompt": tok.apply_chat_template(
-                [{"role": "user", "content": _student_prompt(p.problem)}],
-                tokenize=False,
-                add_generation_prompt=True,
-            ),
+            "prompt": student_chat_prompt(tok, p.problem),
             "answer": p.answer,
         }
         for p in combined
@@ -281,6 +262,7 @@ def _train_ho_student(cfg: SoarConfig, args, combined: List[MathProblem],
         pass_at_k_samples=cfg.pq_pass_at_k_samples,
         pass_at_k_temperature=cfg.pq_temperature,
         out_dir=out_dir,
+        seed=cfg.seed,
     )
 
     print("[ho] constructing GRPOTrainer (enforce_eager patched)")
@@ -334,6 +316,7 @@ def _run_eval_subprocess(cfg: SoarConfig, lora_path: Path, args) -> dict:
         "--temperature", str(cfg.pq_temperature),
         "--max-tokens", str(cfg.pq_max_new_tokens),
         "--ks", ",".join(str(k) for k in cfg.pq_pass_at_k_ks),
+        "--seed", str(cfg.seed),
         "--output-json", str(tmp_json),
     ]
     print(f"[ho] running final eval: {' '.join(cmd)}")

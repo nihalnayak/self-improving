@@ -20,17 +20,15 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from statistics import mean
 from typing import List, Optional
 
 import torch
 from transformers import AutoTokenizer
 
+from eval import run_vllm_eval
 from soar.config import SoarConfig
 from soar.data import MathProblem, load_fail128_split
-from soar.models import load_vllm_engine, student_chat_prompt
-from soar.rollout import vllm_generate
-from soar.verify import success_math_answer
+from soar.models import load_vllm_engine
 
 
 def _resolve_lora_path(promo_dir: Path) -> Optional[Path]:
@@ -62,14 +60,15 @@ def find_lora_students(soar_run: Path) -> List[Path]:
 
 def greedy_pass1(engine, questions: List[MathProblem], lora_path: Path, tok,
                  cfg: SoarConfig) -> float:
-    prompts = [student_chat_prompt(tok, q.problem) for q in questions]
-    completions = vllm_generate(
-        engine, prompts, lora_path=str(lora_path), lora_name="student",
-        max_new_tokens=cfg.student_max_new_tokens, temperature=0.0,
+    if not questions:
+        return 0.0
+    pk = run_vllm_eval(
+        engine, questions, tok,
+        temperature=0.0, n_samples=1,
+        max_new_tokens=cfg.student_max_new_tokens, ks=(1,),
+        seed=cfg.seed, lora_path=str(lora_path),
     )
-    scores = [1.0 if success_math_answer(c, q.answer) else 0.0
-              for c, q in zip(completions, questions)]
-    return float(mean(scores)) if scores else 0.0
+    return pk["1"]
 
 
 def main() -> None:
@@ -140,6 +139,7 @@ def main() -> None:
         "--temperature", str(cfg.pq_temperature),
         "--max-tokens", str(cfg.pq_max_new_tokens),
         "--ks", ",".join(str(k) for k in cfg.pq_pass_at_k_ks),
+        "--seed", str(cfg.seed),
         "--output-json", str(tmp_json),
     ]
     print(f"[ps] running final eval: {' '.join(cmd)}")

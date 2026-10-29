@@ -155,10 +155,17 @@ def chat_prompt(tok, user_msg: str, system_msg: str | None = None) -> str:
 
 
 def student_chat_prompt(tok, question: str) -> str:
-    """Build the student input exactly as specified in SOAR paper page 20.
+    """Build the student input as the paper's SOAR template wrapped in the model's
+    chat template (SOAR paper page 20 for the template body, Llama-3 chat scaffolding
+    around it to match the fine-tuning format).
 
-    The paper's student prompt is a self-contained conversation template (not the model's
-    chat template), so we substitute `{question}` directly and feed the result as a plain
-    text prompt to vLLM. The trailing "Assistant: " primes the model to continue.
+    This is the single source of truth: training-dataset builders, fail@128 filtering,
+    in-training val callbacks, and the final pass@k eval all call this function so that
+    the LoRA sees the same prompt format at train time and inference time.
     """
-    return STUDENT_PROMPT_TEMPLATE.replace("<QUESTION>", question)
+    user_msg = STUDENT_PROMPT_TEMPLATE.replace("<QUESTION>", question)
+    return tok.apply_chat_template(
+        [{"role": "user", "content": user_msg}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
