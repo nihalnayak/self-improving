@@ -7,7 +7,9 @@ class SoarConfig:
     base_model: str = "meta-llama/Llama-3.2-3B-Instruct"
     lora_r: int = 16
     lora_alpha: int = 32
-    lora_target_modules: tuple = ("q_proj", "k_proj", "v_proj", "o_proj")
+    # Either PEFT's "all-linear" shorthand (string) or an explicit tuple like
+    # ("q_proj", "k_proj", "v_proj", "o_proj"). Paper B.7 uses all-linear.
+    lora_target_modules: str | tuple = "all-linear"
     use_lora: bool = False  # train_trl.py: wrap student with PEFT (ref = base w/ adapter disabled)
 
     # ---- data ----
@@ -38,7 +40,7 @@ class SoarConfig:
     # ---- rl ----
     kl_beta: float = 0.02
     max_prompt_len: int = 1024
-    rl_algo: str = "rloo"               # {"rloo", "grpo"}: inner-loop student trainer
+    rl_algo: str = "rloo"               # {"rloo", "grpo", "grpo_no_norm"}: inner-loop + teacher algo
 
     # ---- promotion ----
     promotion_threshold: float = 0.01   # τ (paper)

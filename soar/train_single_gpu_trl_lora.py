@@ -19,7 +19,10 @@ Six phases per outer step (SOAR Alg. 1), identical schema to train_trl.py:
     2. SAMPLE Q_R (baseline eval runs inside the first inner trainer).
     3. INNER TRAINING: for each (X_k, j in 1..r), build a fresh student_model
        from `_scratch/baseline_student/`, wrap in LoRA via TRL, run
-       RLOOTrainer / GRPOTrainer (selected by cfg.rl_algo).
+       RLOOTrainer / GRPOTrainer (selected by cfg.rl_algo ∈
+       {"rloo", "grpo", "grpo_no_norm"}; "grpo" sets scale_rewards=True,
+       "grpo_no_norm" sets scale_rewards=False). Teacher outer update uses
+       matching advantages (leave-one-out, (R-mean)/std, or R-mean).
        KL ref = base model with LoRA disabled (TRL handles automatically when
        `peft_config` is passed and `ref_model=None`). After training, merge the
        student adapter and save merged HF layout to `_scratch/trained_oS_kK_jJ/`.
@@ -116,6 +119,13 @@ def _broadcast_object(obj, accel: Accelerator, src: int = 0):
 
 # ------------- model / tokenizer builders -------------
 
+def _lora_target_modules(cfg: SoarConfig):
+    # PEFT's "all-linear" shorthand only works as a bare string; a list/tuple
+    # containing it is treated as a literal module-name match.
+    tm = cfg.lora_target_modules
+    return tm if isinstance(tm, str) else list(tm)
+
+
 def _build_teacher_peft(cfg: SoarConfig):
     """Base model wrapped with a single LoRA adapter. Trainable params = LoRA only."""
     base = AutoModelForCausalLM.from_pretrained(cfg.base_model, torch_dtype=torch.bfloat16)
@@ -123,7 +133,7 @@ def _build_teacher_peft(cfg: SoarConfig):
     lora_cfg = LoraConfig(
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
-        target_modules=list(cfg.lora_target_modules),
+        target_modules=_lora_target_modules(cfg),
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
@@ -496,8 +506,11 @@ def _run_inner_rloo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
         seed=cfg.seed,
         disable_tqdm=True,
     )
-    if cfg.rl_algo == "grpo":
-        args = GRPOConfig(scale_rewards=False, **common_kwargs)
+    if cfg.rl_algo in ("grpo", "grpo_no_norm"):
+        args = GRPOConfig(
+            scale_rewards=(cfg.rl_algo == "grpo"),
+            **common_kwargs,
+        )
         TrainerCls = GRPOTrainer
     else:
         args = RLOOConfig(**common_kwargs)
@@ -505,7 +518,7 @@ def _run_inner_rloo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
     peft_config = LoraConfig(
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
-        target_modules=list(cfg.lora_target_modules),
+        target_modules=_lora_target_modules(cfg),
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
@@ -689,7 +702,13 @@ def _teacher_rloo_step(
     if g < 2 or R_spread <= 1e-6:
         return {"teacher/skipped": 1.0}, R_spread
 
-    dataset_adv = rloo_advantages(R_k_t, group_size=g)         # [g]
+    if cfg.rl_algo == "grpo":
+        std = R_k_t.std(unbiased=False)
+        dataset_adv = (R_k_t - R_k_t.mean()) / (std + 1e-8)    # [g]
+    elif cfg.rl_algo == "grpo_no_norm":
+        dataset_adv = R_k_t - R_k_t.mean()                     # [g]
+    else:  # rloo
+        dataset_adv = rloo_advantages(R_k_t, group_size=g)     # [g]
     per_rollout_adv = dataset_adv.repeat_interleave(n_per)     # [g*n]
     batch = tokenize_rollouts(
         tok, [teacher_prompt_str + "<question>"] * needed, accepted_raw, device=dev.type,
@@ -741,7 +760,9 @@ def main(cfg: SoarConfig) -> None:
     # File advertises dual-LoRA; force on so the student path can't silently
     # fall back to full-parameter training.
     cfg.use_lora = True
-    assert cfg.rl_algo in ("rloo", "grpo"), f"bad rl_algo={cfg.rl_algo!r}"
+    assert cfg.rl_algo in ("rloo", "grpo", "grpo_no_norm"), (
+        f"bad rl_algo={cfg.rl_algo!r}"
+    )
 
     # TRL colocate vLLM uses `distributed_executor_backend='external_launcher'`,
     # which reads torchrun-style env vars in uniproc_executor._distributed_args.
@@ -1073,7 +1094,8 @@ def _parse_args():
 
     ap.add_argument("--kl-beta", type=float, default=None)
     ap.add_argument("--max-prompt-len", type=int, default=None)
-    ap.add_argument("--rl-algo", type=str, choices=("rloo", "grpo"), default=None)
+    ap.add_argument("--rl-algo", type=str,
+                    choices=("rloo", "grpo", "grpo_no_norm"), default=None)
 
     ap.add_argument("--promotion-threshold", type=float, default=None)
     ap.add_argument("--promotion-window", type=int, default=None)
