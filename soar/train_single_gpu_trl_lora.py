@@ -1,16 +1,18 @@
 """SOAR training loop — single-GPU + dual-LoRA (teacher + student) + TRL RLOO/GRPO + colocate vLLM.
 
-Launch:
-    accelerate launch --num_processes=1 -m soar.train_single_gpu_trl_lora \
-        --out-dir ... --fail128-dir ...
+Launch (one GPU, no accelerate / torchrun):
+    python -m soar.train_single_gpu_trl_lora --out-dir ... --fail128-dir ...
+
+For multi-GPU DDP, use soar.train_multi_gpu_trl_lora instead.
 
 Dual-LoRA variant of train_trl.py:
     - Teacher is a PEFT-wrapped base model. KL reference uses `disable_adapter()`
       (the frozen base), so there is no second teacher_ref model in memory.
     - Student is LoRA-wrapped by TRL via `peft_config=` (same path as
       train_trl.py's `--use-lora`); `cfg.use_lora` is forced True at entry.
-    - FSDP code paths are stripped (single-GPU only). Multi-GPU runs should keep
-      using train_trl.py.
+    - Colocate vLLM runs in-process (vllm_tensor_parallel_size=1); teacher
+      ephemeral vLLM runs in the same process. B*G total student rollouts per
+      outer step: pdt = G, grad_accum = B.
 
 Six phases per outer step (SOAR Alg. 1), identical schema to train_trl.py:
 
@@ -33,12 +35,12 @@ Six phases per outer step (SOAR Alg. 1), identical schema to train_trl.py:
        unmerge so the LoRA remains for the next step.
     6. LOGGING + CHECKPOINT — same wandb schema as train_trl.py.
 
-Memory layout (single H100, Llama-3.2-3B bf16):
+Per-GPU memory layout (H100, Llama-3.2-3B bf16):
     base model          ~6 GB
     teacher LoRA        ~50 MB
     teacher AdamW state ~200 MB
     TRL colocate vLLM   `cfg.vllm_gpu_memory_utilization` fraction
-    phase-1 teacher-gen vLLM: separate ephemeral engine (destroyed after use)
+    phase-1 teacher-gen vLLM: separate ephemeral engine
 """
 
 import argparse
@@ -58,13 +60,10 @@ from typing import List, Optional, Tuple
 import datasets
 import torch
 import wandb
-from accelerate import Accelerator
-from accelerate.utils import broadcast_object_list
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer, RLOOConfig, RLOOTrainer
 from peft import LoraConfig, PeftModel, get_peft_model
 
-from eval import run_vllm_eval
 from soar.config import SoarConfig, smoke_config
 from soar.data import MathProblem, load_fail128_split
 from soar.models import student_chat_prompt
@@ -102,19 +101,10 @@ def _chat_prompt(tok, user_msg: str) -> str:
     )
 
 
-# ------------- accelerator / logging helpers -------------
+# ------------- logging helpers -------------
 
-def _log(accel: Accelerator, *args, **kwargs) -> None:
-    if accel.is_main_process:
-        print(*args, **kwargs, flush=True)
-
-
-def _broadcast_object(obj, accel: Accelerator, src: int = 0):
-    if accel.num_processes == 1:
-        return obj
-    box = [obj if accel.process_index == src else None]
-    broadcast_object_list(box, from_process=src)
-    return box[0]
+def _log(*args, **kwargs) -> None:
+    print(*args, **kwargs, flush=True)
 
 
 # ------------- model / tokenizer builders -------------
@@ -346,25 +336,29 @@ def _vllm_generate_once(
 def _eval_via_trainer_llm(cfg: SoarConfig, trainer, tok,
                           questions: List[MathProblem]) -> float:
     """Greedy-score `questions` via the colocate vLLM engine (merged LoRA)."""
-    # TRL 1.16: colocate engine lives at `trainer.vllm_generation.llm`.
+    from vllm import SamplingParams
+
     gen = getattr(trainer, "vllm_generation", None)
     assert gen is not None and getattr(gen, "llm", None) is not None, (
         "colocate vLLM engine required for _eval_via_trainer_llm"
     )
-    pk = run_vllm_eval(
-        gen.llm, questions, tok,
-        temperature=0.0, n_samples=1,
-        max_new_tokens=cfg.student_max_new_tokens, ks=(1,),
-        seed=cfg.seed,
+
+    prompts = [student_chat_prompt(tok, q.problem) for q in questions]
+    sp = SamplingParams(temperature=0.0, top_p=1.0,
+                        max_tokens=cfg.student_max_new_tokens)
+    outputs = gen.llm.generate(prompts, sp, use_tqdm=False)
+    correct = sum(
+        1 for o, q in zip(outputs, questions)
+        if success_math_answer(o.outputs[0].text, q.answer)
     )
-    return pk["1"]
+    total = len(questions)
+    return float(correct) / total if total > 0 else 0.0
 
 
 def _generate_teacher_batch_vllm(
     cfg: SoarConfig, ckpt_dir: Path, teacher_prompt_str: str, needed: int,
-    accel: Accelerator,
 ) -> Tuple[List[str], List[MathProblem], int]:
-    """Loop teacher vLLM gen until exactly `needed` parseable problems are accepted."""
+    """Loop teacher vLLM gen until `needed` parseable problems are accepted."""
     accepted_raw: List[str] = []
     accepted_problems: List[MathProblem] = []
     total_generated = 0
@@ -386,10 +380,11 @@ def _generate_teacher_batch_vllm(
                 if len(accepted_problems) >= needed:
                     break
         round_idx += 1
-        _log(accel, f"  [teacher-gen round {round_idx}] "
-                    f"total_generated={total_generated} "
-                    f"accepted={len(accepted_problems)}/{needed} "
-                    f"cum_yield={len(accepted_problems) / max(total_generated, 1):.2%}")
+        print(f"  [teacher-gen round {round_idx}] "
+              f"total_generated={total_generated} "
+              f"accepted={len(accepted_problems)}/{needed} "
+              f"cum_yield={len(accepted_problems) / max(total_generated, 1):.2%}",
+              flush=True)
     return accepted_raw, accepted_problems, total_generated
 
 
@@ -407,7 +402,6 @@ def eager_llm_init(self, *args, **kwargs):
 
 def _run_inner_rloo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
                     baseline_ckpt_dir: Path, out_dir: str,
-                    accel: Accelerator,
                     *, inner_steps: Optional[int] = None,
                     eval_questions: Optional[List[MathProblem]] = None,
                     eval_baseline: bool = False,
@@ -458,23 +452,15 @@ def _run_inner_rloo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
         del pm
         gc.collect()
 
-    # TRL 0.19.1 constraint: (per_device_train_batch_size * num_processes) must be
-    # divisible by num_generations so each micro-batch holds whole groups.
+    # TRL constraint: per_device_train_batch_size must be divisible by
+    # num_generations so each micro-batch holds whole groups. Single GPU →
+    # pdt=G, grad_accum=B gives exactly B*G sequences per step.
     G = cfg.student_group_size
     B = cfg.student_batch_problems
-    N = accel.num_processes
-    pdt = G // math.gcd(G, N)
-    assert (pdt * N) % G == 0
-    total_sequences_per_step = B * G
-    denom = pdt * N
-    if total_sequences_per_step % denom != 0:
-        raise ValueError(
-            f"Cannot hit batch={B} x group={G} = {total_sequences_per_step} sequences/step "
-            f"with per_device_train_batch_size={pdt} x num_processes={N} = {denom}."
-        )
-    grad_accum = total_sequences_per_step // denom
-    _log(accel, f"  [{cfg.rl_algo}] B={B} G={G} N={N} pdt={pdt} grad_accum={grad_accum} "
-                f"(prompts/step={B}, seqs/step={B*G})")
+    pdt = G
+    grad_accum = B
+    _log(f"  [{cfg.rl_algo}] B={B} G={G} pdt={pdt} grad_accum={grad_accum} "
+         f"(prompts/step={B}, seqs/step={B*G})")
 
     # TRL 1.16 dropped `max_prompt_length` from both RLOOConfig and GRPOConfig;
     # prompt truncation is now handled implicitly by `vllm_max_model_length`
@@ -608,9 +594,8 @@ def _run_inner_rloo(cfg: SoarConfig, tok, X_k: List[MathProblem], tag: str,
 
     trainer.model.zero_grad(set_to_none=True)
 
-    # Clear only the disposable trainer's Accelerator.
-    if trainer.accelerator is not accel:
-        trainer.accelerator.free_memory()
+    # Each inner trainer creates its own Accelerator internally; free it.
+    trainer.accelerator.free_memory()
 
     del trainer, student_model
     gc.collect()
@@ -690,12 +675,11 @@ def _teacher_rloo_step(
     teacher_model, tok, cfg: SoarConfig,
     teacher_prompt_str: str, accepted_raw: List[str],
     R_k: List[float], teacher_opt: torch.optim.Optimizer, n_per: int,
-    accel: Accelerator,
 ) -> Tuple[dict, float]:
     """One teacher RLOO step. Returns (metrics, R_spread). Skips if g<2 or spread ≤ 1e-6."""
     g = len(R_k)
     needed = g * n_per
-    dev = accel.device
+    dev = next(teacher_model.parameters()).device
 
     R_k_t = torch.tensor(R_k, dtype=torch.float32, device=dev)
     R_spread = (R_k_t.max() - R_k_t.min()).item() if g >= 2 else 0.0
@@ -730,14 +714,15 @@ def _teacher_rloo_step(
             advantages=per_rollout_adv[i:i + 1],
             kl_beta=cfg.kl_beta,
         )
-        accel.backward(out["loss"] / needed)
+        # Average over `needed` micro-batches to match the per-step gradient scale.
+        (out["loss"] / needed).backward()
         for k in agg:
             v = out[k]
             agg[k] += float(v.detach() if isinstance(v, torch.Tensor) else v)
     for k in agg:
         agg[k] /= needed
 
-    grad_norm = accel.clip_grad_norm_(
+    grad_norm = torch.nn.utils.clip_grad_norm_(
         [p for p in teacher_model.parameters() if p.requires_grad], 1.0,
     )
     teacher_opt.step()
@@ -764,11 +749,8 @@ def main(cfg: SoarConfig) -> None:
         f"bad rl_algo={cfg.rl_algo!r}"
     )
 
-    # TRL colocate vLLM uses `distributed_executor_backend='external_launcher'`,
-    # which reads torchrun-style env vars in uniproc_executor._distributed_args.
-    # `accelerate launch --num_processes 1` goes through simple_launcher and
-    # does NOT set them, so RLOOTrainer init crashes with KeyError: 'RANK'.
-    # Fill in single-process defaults (setdefault leaves torchrun values alone).
+    # TRL colocate vLLM reads torchrun-style env vars in uniproc_executor._distributed_args.
+    # We're not launched under torchrun, so fill in single-process defaults.
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("LOCAL_RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
@@ -776,20 +758,16 @@ def main(cfg: SoarConfig) -> None:
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
 
-    accel = Accelerator()
-    random.seed(cfg.seed + accel.process_index)
+    random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     rng = random.Random(cfg.seed)
 
-    if accel.is_main_process:
-        Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
-        with open(Path(cfg.out_dir) / "config.json", "w") as f:
-            json.dump({k: (list(v) if isinstance(v, tuple) else v)
-                       for k, v in cfg.__dict__.items()}, f, indent=2)
+    Path(cfg.out_dir).mkdir(parents=True, exist_ok=True)
+    with open(Path(cfg.out_dir) / "config.json", "w") as f:
+        json.dump({k: (list(v) if isinstance(v, tuple) else v)
+                   for k, v in cfg.__dict__.items()}, f, indent=2)
 
-    _log(accel, f"[setup] world_size={accel.num_processes} "
-                f"distributed_type={accel.distributed_type.name}  "
-                f"base_model={cfg.base_model}")
+    _log(f"[setup] base_model={cfg.base_model}")
 
     teacher_model = _build_teacher_peft(cfg)
     # PEFT + gradient checkpointing: enable on the base and route grads through
@@ -798,20 +776,20 @@ def main(cfg: SoarConfig) -> None:
         gradient_checkpointing_kwargs={"use_reentrant": False},
     )
     teacher_model.enable_input_require_grads()
+    teacher_model = teacher_model.to("cuda")
 
     teacher_trainable = [p for p in teacher_model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in teacher_trainable)
     n_total = sum(p.numel() for p in teacher_model.parameters())
-    _log(accel, f"[setup] teacher LoRA trainable params: {n_trainable:,} / {n_total:,} "
-                f"({100 * n_trainable / n_total:.3f}%)")
+    _log(f"[setup] teacher LoRA trainable params: {n_trainable:,} / {n_total:,} "
+         f"({100 * n_trainable / n_total:.3f}%)")
 
     teacher_opt = torch.optim.AdamW(teacher_trainable, lr=cfg.teacher_lr)
-    teacher_model, teacher_opt = accel.prepare(teacher_model, teacher_opt)
     tok = _build_tokenizer(cfg)
 
-    _log(accel, f"[setup] loading fail@128 split from {cfg.fail128_dir}")
+    _log(f"[setup] loading fail@128 split from {cfg.fail128_dir}")
     train_set, _ = load_fail128_split(cfg.fail128_dir)
-    _log(accel, f"[setup] |train|={len(train_set)}")
+    _log(f"[setup] |train|={len(train_set)}")
     assert len(train_set) >= cfg.n_reward_questions, "not enough train problems for Q_R"
 
     # Seed both role-dirs on disk from the pretrained teacher weights (LoRA is
@@ -820,17 +798,15 @@ def main(cfg: SoarConfig) -> None:
     teacher_ckpt = scratch_dir / "teacher"
     baseline_student_ckpt = scratch_dir / "baseline_student"
     teacher_latest_dir = Path(cfg.out_dir) / "teacher_latest"
-    if accel.is_main_process:
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-    _save_merged_teacher(accel.unwrap_model(teacher_model), tok, teacher_ckpt)
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    _save_merged_teacher(teacher_model, tok, teacher_ckpt)
 
-    if accel.is_main_process:
-        wandb.init(
-            project=cfg.wandb_project,
-            mode=cfg.wandb_mode,
-            name=Path(cfg.out_dir).name,
-            config=cfg.__dict__,
-        )
+    wandb.init(
+        project=cfg.wandb_project,
+        mode=cfg.wandb_mode,
+        name=Path(cfg.out_dir).name,
+        config=cfg.__dict__,
+    )
 
     promotions_window: deque = deque(maxlen=cfg.promotion_window)
     n_promotions = 0
@@ -841,15 +817,15 @@ def main(cfg: SoarConfig) -> None:
     if _MEM_DEBUG and torch.cuda.is_available():
         try:
             torch.cuda.memory._record_memory_history(max_entries=200_000)
-            _log(accel, "[mem] recording cuda memory history (SOAR_MEM_DEBUG=1)")
+            _log("[mem] recording cuda memory history (SOAR_MEM_DEBUG=1)")
         except Exception as e:
-            _log(accel, f"[mem] could not enable history: {e}")
+            _log(f"[mem] could not enable history: {e}")
     mem_baseline: Optional[Tuple[int, int]] = None
     mem_prev_step: Optional[Tuple[int, int]] = None
 
     for outer_step in range(cfg.n_outer_steps):
         t_start = time.time()
-        _log(accel, f"\n========== OUTER STEP {outer_step}/{cfg.n_outer_steps} ==========")
+        _log(f"\n========== OUTER STEP {outer_step}/{cfg.n_outer_steps} ==========")
         if _MEM_DEBUG:
             mem_step_start = _mem_log(
                 f"outer {outer_step} START",
@@ -865,20 +841,19 @@ def main(cfg: SoarConfig) -> None:
         t_phase = time.time()
         teacher_prompt_str = _chat_prompt(tok, TEACHER_PROMPT)
         accepted_raw, accepted_problems, total_generated = _generate_teacher_batch_vllm(
-            cfg, teacher_ckpt, teacher_prompt_str, needed_teacher, accel,
+            cfg, teacher_ckpt, teacher_prompt_str, needed_teacher,
         )
         teacher_gen_sec = time.time() - t_phase
         teacher_yield = len(accepted_problems) / max(total_generated, 1)
         if len(accepted_problems) < needed_teacher:
-            _log(accel, f"[step {outer_step}] teacher yield too low "
-                        f"({len(accepted_problems)}/{needed_teacher}) — skipping")
-            if accel.is_main_process:
-                wandb.log({
-                    "outer_step": outer_step, "skipped": 1,
-                    "teacher/yield": teacher_yield,
-                    "teacher/total_generated": total_generated,
-                    "timing/teacher_gen_sec": teacher_gen_sec,
-                }, step=outer_step)
+            _log(f"[step {outer_step}] teacher yield too low "
+                 f"({len(accepted_problems)}/{needed_teacher}) — skipping")
+            wandb.log({
+                "outer_step": outer_step, "skipped": 1,
+                "teacher/yield": teacher_yield,
+                "teacher/total_generated": total_generated,
+                "timing/teacher_gen_sec": teacher_gen_sec,
+            }, step=outer_step)
             continue
         X = [accepted_problems[k * n_per:(k + 1) * n_per] for k in range(g)]
 
@@ -905,24 +880,24 @@ def main(cfg: SoarConfig) -> None:
                     30,
                 )
                 inner_stats, trained_dir, base_acc_run, trained_acc = _run_inner_rloo(
-                    cfg, tok, X[k], tag, baseline_student_ckpt, cfg.out_dir, accel,
+                    cfg, tok, X[k], tag, baseline_student_ckpt, cfg.out_dir,
                     inner_steps=effective_inner_steps,
                     eval_questions=Q_R,
                     eval_baseline=(run_idx == 1),
                 )
                 if base_acc_run is not None:
                     base_acc = base_acc_run
-                    _log(accel, f"[step {outer_step}] baseline acc={base_acc:.3f}")
+                    _log(f"[step {outer_step}] baseline acc={base_acc:.3f}")
                 trained_ckpts[k][j] = trained_dir
                 outer_n_rollouts += int(inner_stats["n_rollouts"])
                 outer_n_correct += int(inner_stats["n_correct"])
                 outer_reward_sum += (float(inner_stats["mean_reward_run"])
                                      * int(inner_stats["n_rollouts"]))
                 R_matrix[k][j] = trained_acc - base_acc
-                _log(accel, f"[step {outer_step}] ({run_idx}/{total_inner}) "
-                            f"X_{k} r{j}: acc={trained_acc:.3f} "
-                            f"Δ={trained_acc - base_acc:+.3f} "
-                            f"({time.time() - t_run:.1f}s)")
+                _log(f"[step {outer_step}] ({run_idx}/{total_inner}) "
+                     f"X_{k} r{j}: acc={trained_acc:.3f} "
+                     f"Δ={trained_acc - base_acc:+.3f} "
+                     f"({time.time() - t_run:.1f}s)")
 
         inner_train_sec = time.time() - t_phase
         R_k = [float(mean(row)) for row in R_matrix]
@@ -942,37 +917,35 @@ def main(cfg: SoarConfig) -> None:
             sorted_j = sorted(range(r_parallel), key=lambda j: rewards_kstar[j])
             j_star = sorted_j[r_parallel // 2]
             n_promotions += 1
-            if accel.is_main_process:
-                _replace_dir(trained_ckpts[k_star][j_star], baseline_student_ckpt)
-                _append_promotion_questions(cfg.out_dir, n_promotions, X[k_star])
-                promo_dir = Path(cfg.out_dir) / "promotions" / f"promo_{n_promotions:03d}"
-                promo_dir.mkdir(parents=True, exist_ok=True)
-                _replace_dir(baseline_student_ckpt, promo_dir / "student")
-                with open(Path(cfg.out_dir) / "promotions" / "index.jsonl", "a") as f:
-                    f.write(json.dumps({
-                        "promotion_idx": n_promotions, "outer_step": outer_step,
-                        "k_star": k_star, "j_star": j_star,
-                        "R_bar_t": R_bar_t, "moving_avg": ma,
-                    }) + "\n")
+            _replace_dir(trained_ckpts[k_star][j_star], baseline_student_ckpt)
+            _append_promotion_questions(cfg.out_dir, n_promotions, X[k_star])
+            promo_dir = Path(cfg.out_dir) / "promotions" / f"promo_{n_promotions:03d}"
+            promo_dir.mkdir(parents=True, exist_ok=True)
+            _replace_dir(baseline_student_ckpt, promo_dir / "student")
+            with open(Path(cfg.out_dir) / "promotions" / "index.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "promotion_idx": n_promotions, "outer_step": outer_step,
+                    "k_star": k_star, "j_star": j_star,
+                    "R_bar_t": R_bar_t, "moving_avg": ma,
+                }) + "\n")
             promotions_window.clear()
             promoted_this_step = 1
-            _log(accel, f"[step {outer_step}] PROMOTED "
-                        f"(k*={k_star}, j*={j_star}, MA={ma:+.3f})")
+            _log(f"[step {outer_step}] PROMOTED "
+                 f"(k*={k_star}, j*={j_star}, MA={ma:+.3f})")
 
-        if accel.is_main_process:
-            _save_teacher_outer_data(
-                cfg.out_dir, outer_step, X, R_k,
-                promoted_k_star=(k_star if promoted_this_step else None),
-            )
+        _save_teacher_outer_data(
+            cfg.out_dir, outer_step, X, R_k,
+            promoted_k_star=(k_star if promoted_this_step else None),
+        )
 
         # ----- 5. TEACHER RLOO UPDATE (KL ref via disable_adapter) -----
         t_phase = time.time()
         teacher_metrics, R_spread = _teacher_rloo_step(
             teacher_model, tok, cfg,
-            teacher_prompt_str, accepted_raw, R_k, teacher_opt, n_per, accel,
+            teacher_prompt_str, accepted_raw, R_k, teacher_opt, n_per,
         )
         # Persist updated teacher weights (merged) for next outer step's vLLM gen.
-        _save_merged_teacher(accel.unwrap_model(teacher_model), tok, teacher_ckpt)
+        _save_merged_teacher(teacher_model, tok, teacher_ckpt)
         # Mirror to a stable top-level path so external evals always have a
         # current teacher to point at (ckpt_outer{N}/ only fires every ckpt_every).
         _replace_dir(teacher_ckpt, teacher_latest_dir)
@@ -1028,26 +1001,22 @@ def main(cfg: SoarConfig) -> None:
                 )
             if _MEM_TOP_TENSORS:
                 _mem_top_tensors(_MEM_TOP_TENSORS)
-            if (_MEM_SNAPSHOT_EVERY
-                    and (outer_step + 1) % _MEM_SNAPSHOT_EVERY == 0
-                    and accel.is_main_process):
+            if _MEM_SNAPSHOT_EVERY and (outer_step + 1) % _MEM_SNAPSHOT_EVERY == 0:
                 _mem_dump_snapshot(Path(cfg.out_dir), f"outer_{outer_step:04d}")
 
-        if accel.is_main_process:
-            wandb.log(log, step=outer_step)
+        wandb.log(log, step=outer_step)
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-        _log(accel, f"[step {outer_step}] R̄_t={R_bar_t:+.3f} "
-                    f"promo={promoted_this_step} dt={dt:.1f}s "
-                    f"peak_mem={gpu_mem_gb:.1f}GB")
+        _log(f"[step {outer_step}] R̄_t={R_bar_t:+.3f} "
+             f"promo={promoted_this_step} dt={dt:.1f}s "
+             f"peak_mem={gpu_mem_gb:.1f}GB")
 
         if outer_step % cfg.ckpt_every == 0:
             ckpt_dir = Path(cfg.out_dir) / f"ckpt_outer{outer_step}"
-            if accel.is_main_process:
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                _replace_dir(teacher_ckpt, ckpt_dir / "teacher")
-                if baseline_student_ckpt.exists():
-                    _replace_dir(baseline_student_ckpt, ckpt_dir / "baseline_student")
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            _replace_dir(teacher_ckpt, ckpt_dir / "teacher")
+            if baseline_student_ckpt.exists():
+                _replace_dir(baseline_student_ckpt, ckpt_dir / "baseline_student")
 
         # Promoted winner was already copied into baseline_student_ckpt and
         # promotions/promo_NNN/; every other trained_* adapter is dead weight.
@@ -1056,9 +1025,8 @@ def main(cfg: SoarConfig) -> None:
                 if p is not None:
                     _rmtree(p)
 
-    if accel.is_main_process:
-        wandb.finish()
-    _log(accel, f"[done] total promotions = {n_promotions}")
+    wandb.finish()
+    _log(f"[done] total promotions = {n_promotions}")
 
 
 # ------------- CLI (identical flag set to train_trl.py) -------------
