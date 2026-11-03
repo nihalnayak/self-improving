@@ -39,13 +39,13 @@ def gen_lists(lengths, n_per_length, lo, hi, seed):
     }
 
 
-def build_prompt(tok, nums):
+def build_prompt(tok, nums, enable_thinking=False):
     msg = [{"role": "user", "content": PROMPT_TEMPLATE.format(list_str=str(nums))}]
     return tok.apply_chat_template(
         msg,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
 
 
@@ -80,7 +80,7 @@ def parse_sorted(text):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
-    ap.add_argument("--lengths", type=int, nargs="+", default=[4, 8, 16, 32])
+    ap.add_argument("--lengths", type=int, nargs="+", default=[32, 64, 128])
     ap.add_argument("--n-lists", type=int, default=100)
     ap.add_argument("--n-samples", type=int, default=5)
     ap.add_argument("--lo", type=int, default=0)
@@ -88,11 +88,16 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
     ap.add_argument("--max-tokens", type=int, default=2048)
+    ap.add_argument("--thinking", action="store_true",
+                    help="Enable thinking mode; caps max_tokens at 1024.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     ap.add_argument("--out-dir", default="files/results/sorting")
     args = ap.parse_args()
+
+    if args.thinking:
+        args.max_tokens = 1024
 
     out_dir = Path(args.out_dir) / args.model.replace("/", "_")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -106,8 +111,18 @@ def main():
     prompts, index = [], []
     for L in args.lengths:
         for i, xs in enumerate(data[L]):
-            prompts.append(build_prompt(tok, xs))
+            prompts.append(build_prompt(tok, xs, enable_thinking=args.thinking))
             index.append((L, i))
+
+    # Show one fully-formatted prompt per length so we can eyeball the input.
+    print("\n=== example prompts (one per length) ===")
+    for L in args.lengths:
+        # First prompt at this length is the first time we see L in `index`.
+        j = next(k for k, (LL, _) in enumerate(index) if LL == L)
+        print(f"\n--- len={L}  input list = {data[L][0]}")
+        print(f"--- gold          = {gold[L][0]}")
+        print(f"--- prompt text:\n{prompts[j]}")
+        print("--- end prompt ---")
 
     # 3) Load vLLM.
     n_gpus = max(1, torch.cuda.device_count())
@@ -165,6 +180,25 @@ def main():
     for L in args.lengths:
         print(f"  len={L:>3}: {pass_at_5[L]*100:5.1f}%  ({n_pass[L]}/{n_total[L]})")
 
+    # Show a few input/completion/parse examples per length for sanity-checking.
+    n_show_items = 2            # items per length
+    n_show_samples = 2          # samples per item (of args.n_samples)
+    print("\n=== example completions ===")
+    by_length = {L: [r for r in per_item if r["length"] == L] for L in args.lengths}
+    for L in args.lengths:
+        print(f"\n--- len={L} ---")
+        for r in by_length[L][:n_show_items]:
+            print(f"\n[len={L} idx={r['idx']}] pass@{args.n_samples}={r['pass_at_n']}")
+            print(f"  input      = {r['input']}")
+            print(f"  gold       = {r['gold']}")
+            for s, (c, p, ok) in enumerate(zip(r["completions"], r["parsed"], r["oks"])):
+                if s >= n_show_samples:
+                    break
+                c_show = c if len(c) <= 400 else c[:400] + f"... [truncated, total {len(c)} chars]"
+                print(f"  sample[{s}] ok={ok}")
+                print(f"    completion = {c_show!r}")
+                print(f"    parsed     = {p}")
+
     # 5) Persist.
     summary = {
         "model": args.model,
@@ -176,6 +210,7 @@ def main():
         "temperature": args.temperature,
         "top_p": args.top_p,
         "max_tokens": args.max_tokens,
+        "thinking": args.thinking,
         "seed": args.seed,
         "pass_at_n": {str(L): pass_at_5[L] for L in args.lengths},
         "n_pass": {str(L): n_pass[L] for L in args.lengths},
@@ -187,7 +222,6 @@ def main():
         for r in per_item:
             f.write(json.dumps(r) + "\n")
     print(f"\n[saved] {out_dir}/summary.json  and per_item.jsonl")
-
 
 if __name__ == "__main__":
     main()
