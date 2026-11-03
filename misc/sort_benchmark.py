@@ -87,17 +87,17 @@ def main():
     ap.add_argument("--hi", type=int, default=10000)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
-    ap.add_argument("--max-tokens", type=int, default=2048)
+    ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--thinking", action="store_true",
-                    help="Enable thinking mode; caps max_tokens at 1024.")
+                    help="Enable thinking mode")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--max-model-len", type=int, default=4096)
+    ap.add_argument("--max-model-len", type=int, default=8192)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     ap.add_argument("--out-dir", default="files/results/sorting")
     args = ap.parse_args()
 
-    if args.thinking:
-        args.max_tokens = 1024
+    # if args.thinking:
+    #     args.max_tokens = 2048
 
     out_dir = Path(args.out_dir) / args.model.replace("/", "_")
     out_dir.mkdir(parents=True, exist_ok=True)
