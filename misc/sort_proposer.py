@@ -3,12 +3,14 @@
 Prompts Qwen3-4B (as a Conjecturer, cf. SGS §E.1, arxiv 2604.20209v1) to
 propose a *simpler* sorting problem (a list of fewer than L ints in
 [lo, hi]) as a stepping stone toward a target L-element sorting task, and
-its solution. The final problem is emitted in the exact benchmark format
-(see misc/sort_benchmark.py) followed by the solution in \\boxed{...}.
+its solution. Each prompt shows one concrete random example sorting
+problem (variable length in [2, L]) as context; the final proposed
+problem is emitted in the benchmark format (see misc/sort_benchmark.py)
+followed by the solution in a <solution>...</solution> block.
 
-Draws 10 completions in a single vLLM call (SamplingParams(n=10)) and
-reports how many were parsable, had a shorter-than-L length, and had a
-boxed solution matching sorted(problem).
+Issues `n_samples` separate prompts with SamplingParams(n=1), one per
+distinct example list, and reports how many completions were parsable,
+had a shorter-than-L length, and had a solution matching sorted(problem).
 
 Usage:
     python -m misc.sort_proposer
@@ -17,6 +19,7 @@ Usage:
 
 import argparse
 import json
+import random
 import re
 import time
 from pathlib import Path
@@ -30,29 +33,37 @@ from vllm import LLM, SamplingParams
 # an easier sub-problem (shorter list) as a stepping stone toward the target
 # L-element task.
 PROMPT_TEMPLATE = (
-    "I am learning to sort lists of {L} integers in [{lo}, {hi}] in "
-    "ascending order. This is the task I ultimately want to solve.\n\n"
-    "To make progress, I want to first practice on a simpler version: a "
-    "shorter sorting problem with fewer than {L} integers (but at least 12) "
-    "in [{lo}, {hi}]. Learning to solve this simpler task will be a "
-    "stepping stone toward solving the more challenging {L}-element task.\n\n"
-    "Please generate one such simpler sorting problem and its solution. "
-    "The list should NOT already be sorted, and should NOT be an obvious "
-    "canonical example.\n\n"
-    "You may think step-by-step before producing the final output.\n\n"
-    "Output the final problem and solution in exactly the following format, "
-    "with nothing after the solution:\n\n"
-    "<problem> Sort the numbers in the list in ascending order.\n\n"
-    "List: [a, b, c, ...]\n\n</problem>\n\n"
-    "Return only the sorted list on a single line, enclosed in \\boxed{{}}, "
-    "e.g. \\boxed{{[1, 2, 3]}}.\n\n"
-    "\\boxed{{[sorted, ...]}}\n\n"
-    "All thinking should go before this block so the final output is cleanly separated.\n\n"
+    "I am learning to sort lists of integers in [{lo}, {hi}] in "
+    "ascending order. This is the task I ultimately want to solve. "
+    "Here is one example sorting problem for reference:\n\n"
+    "List: {example_list}\n\n"
+    "To make progress, I want to first practice on a simpler version: "
+    "a shorter and easier sorting problem. "
+    "Learning to solve this simpler task will be a "
+    "stepping stone toward solving the more challenging "
+    "task.\n\n"
+    "Generate one such simpler sorting problem and its solution. "
+    "The input list must NOT already be sorted and must NOT be an "
+    "obvious canonical example. The solution must contain exactly "
+    "the same integers, including duplicates, in ascending order.\n\n"
+    "Return exactly the following two blocks, replacing the placeholder "
+    "lists with actual integers:\n\n"
+    "<problem>\n"
+    "Sort the numbers in the list in ascending order.\n"
+    "List: [a, b, c, ...]\n"
+    "</problem>\n"
+    "<solution>\n"
+    "[sorted integers]\n"
+    "</solution>\n\n"
+    "Write each list on a single line using comma-separated integers. "
+    "Do not include reasoning, explanations, Markdown fences, LaTeX, "
+    "or any text outside these two blocks."
 )
 
 
-def build_prompt(tok, L, lo, hi, enable_thinking=False):
-    msg = [{"role": "user", "content": PROMPT_TEMPLATE.format(L=L, lo=lo, hi=hi)}]
+def build_prompt(tok, L, lo, hi, example_list, enable_thinking=False):
+    msg = [{"role": "user", "content": PROMPT_TEMPLATE.format(
+        L=L, lo=lo, hi=hi, example_list=str(example_list))}]
     return tok.apply_chat_template(
         msg,
         tokenize=False,
@@ -132,12 +143,24 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    prompt = build_prompt(
-        tok, args.list_length, args.lo, args.hi, enable_thinking=args.thinking
-    )
 
-    print("=== proposer prompt ===")
-    print(prompt)
+    rng = random.Random(args.seed)
+    example_lists = [
+        [rng.randint(args.lo, args.hi)
+         for _ in range(rng.randint(2, args.list_length))]
+        for _ in range(args.n_samples)
+    ]
+    prompts = [
+        build_prompt(
+            tok, args.list_length, args.lo, args.hi, example_lists[i],
+            enable_thinking=args.thinking,
+        )
+        for i in range(args.n_samples)
+    ]
+
+    print(f"=== proposer prompt (1 of {args.n_samples}; each uses a "
+          f"distinct example of variable length in [2, {args.list_length}]) ===")
+    print(prompts[0])
     print("=== end prompt ===\n")
 
     n_gpus = max(1, torch.cuda.device_count())
@@ -154,22 +177,21 @@ def main():
     )
 
     sp = SamplingParams(
-        n=args.n_samples,
+        n=1,
         temperature=args.temperature,
         top_p=args.top_p,
         max_tokens=args.max_tokens,
         seed=args.seed,
     )
 
-    print(f"[gen] 1 prompt x n={args.n_samples}")
+    print(f"[gen] {len(prompts)} prompts x n=1")
     t0 = time.time()
-    outs = engine.generate([prompt], sp)
+    outs = engine.generate(prompts, sp)
     runtime = time.time() - t0
 
-    completions = [o.text for o in outs[0].outputs]
-
     samples = []
-    for i, c in enumerate(completions):
+    for i, req in enumerate(outs):
+        c = req.outputs[0].text
         problem = extract_problem(c)
         solution = extract_solution(c)
         problem_ok = problem is not None
@@ -179,6 +201,8 @@ def main():
         correct = both_ok and solution == sorted(problem)
         samples.append({
             "idx": i,
+            "example_list": example_lists[i],
+            "example_len": len(example_lists[i]),
             "completion": c,
             "problem": problem,
             "solution": solution,
@@ -196,11 +220,13 @@ def main():
         c = r["completion"]
         c_show = c if len(c) <= 800 else c[:800] + f"... [truncated, total {len(c)} chars]"
         print(f"\n--- sample[{r['idx']}] "
+              f"example_len={r['example_len']} "
               f"problem_parsed={r['problem_parsed']} "
               f"boxed_parsed={r['boxed_parsed']} "
               f"len={r['problem_len']} "
               f"len_ok={r['problem_len_ok']} "
               f"correct={r['correct']}")
+        print(f"  example list      : {r['example_list']}")
         print(f"  completion: {c_show!r}")
         print(f"  extracted problem : {r['problem']}")
         print(f"  extracted solution: {r['solution']}")
