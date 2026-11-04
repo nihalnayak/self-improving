@@ -87,7 +87,7 @@ def main():
     ap.add_argument("--hi", type=int, default=10000)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-p", type=float, default=1.0)
-    ap.add_argument("--max-tokens", type=int, default=8192)
+    ap.add_argument("--max-tokens", type=int, default=4096)
     ap.add_argument("--thinking", action="store_true",
                     help="Enable thinking mode")
     ap.add_argument("--seed", type=int, default=42)
