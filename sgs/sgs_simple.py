@@ -53,6 +53,9 @@ import numpy as np
 import ray
 import torch
 
+from sgs.common import (PatchedActorRolloutRefWorker, _BRACKET_RE, _ints, load_targets,
+                        parse_sorted, ray_runtime_env, solver_messages, user_msg)
+
 
 # =============================================================================
 # §1 Args
@@ -136,14 +139,6 @@ CONJ_PROMPT = (
     "or any text outside these two blocks."
 )
 
-# Solver: verbatim from misc/sort_benchmark.py.
-SOLVER_PROMPT = (
-    "Sort the numbers in the list in ascending order.\n\n"
-    "List: {list_str}\n\n"
-    "Return only the sorted list on a single line, enclosed in \\boxed{{}}, "
-    "e.g. \\boxed{{[1, 2, 3]}}."
-)
-
 # Guide: paper §E.3 (relevance 0-5, redundancy 0/1, complexity 0-4), with the
 # Lean "lemma / premises / conclusion" wording mapped onto sorting problems.
 GUIDE_PROMPT = (
@@ -206,17 +201,8 @@ GUIDE_PROMPT = (
 SEED_STATEMENT = "Sort the numbers in the list in ascending order.\nList: {list_str}"
 
 
-def user_msg(text):
-    """One-turn chat. verl applies the chat template to this, never us."""
-    return [{"role": "user", "content": text}]
-
-
 def conj_messages(target, lo, hi):
     return user_msg(CONJ_PROMPT.format(lo=lo, hi=hi, example_list=str(target)))
-
-
-def solver_messages(xs):
-    return user_msg(SOLVER_PROMPT.format(list_str=str(xs)))
 
 
 def guide_messages(target, conj_statement):
@@ -229,16 +215,6 @@ def guide_messages(target, conj_statement):
 # =============================================================================
 
 _PROBLEM_RE = re.compile(r"<problem>(.*?)</problem>", re.DOTALL | re.IGNORECASE)
-_BOXED_RE = re.compile(r"\\boxed\{(.*?)\}", re.DOTALL)
-_BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")
-_NUM_RE = re.compile(r"-?\d+")
-
-
-def _ints(s):
-    nums = _NUM_RE.findall(s)
-    return [int(n) for n in nums] if nums else None
-
-
 def parse_conjecture(text):
     """(statement, list) from the last non-empty <problem> block (misc/sort_proposer.py).
 
@@ -250,15 +226,6 @@ def parse_conjecture(text):
     brackets = _BRACKET_RE.findall(blocks[-1])
     xs = _ints(brackets[-1]) if brackets else None
     return (blocks[-1], xs) if xs else (None, None)
-
-
-def parse_sorted(text):
-    """Solver answer: first \\boxed{...}, else last [...] (misc/sort_benchmark.py)."""
-    m = _BOXED_RE.search(text)
-    if m:
-        return _ints(m.group(1))
-    brackets = _BRACKET_RE.findall(text)
-    return _ints(brackets[-1]) if brackets else None
 
 
 def parse_guide(text):
@@ -316,44 +283,21 @@ def minmax(r):
 # prefix ("vllm_{tag}_") on both sides of the lookup: the replica that creates
 # the server (driver side) and the ServerAdapter that finds it (worker side).
 
-from verl.workers.engine_workers import ActorRolloutRefWorker  # noqa: E402
 from verl.single_controller.base.decorator import Dispatch, register  # noqa: E402
 
 
-class TaggedActorRolloutWorker(ActorRolloutRefWorker):
-    """ActorRolloutRefWorker whose vLLM ServerAdapter looks up `vllm_{tag}_server_*`."""
+class TaggedActorRolloutWorker(PatchedActorRolloutRefWorker):
+    """Patched worker whose vLLM ServerAdapter looks up `vllm_{tag}_server_*`."""
 
     def __init__(self, config, role, tag):
         super().__init__(config, role)
         self.server_tag = tag
-        # verl 0.9.1's monkey patch imports trl's PPO value-head class, which
-        # trl 1.16 no longer has. It only matters for critic/value models, so skip it.
-        import verl.models.transformers.monkey_patch as verl_monkey_patch
-        verl_monkey_patch.is_trl_available = lambda: False
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         super().init_model()
         prefix = f"vllm_{self.server_tag}_"
         self.rollout._get_server_name_prefix = lambda: prefix
-
-        # verl loads weights into vLLM one bucket at a time, and vLLM >= 0.31
-        # raises if a bucket has `lm_head.weight` (tied alias) without
-        # `model.embed_tokens.weight`. The receiver dies, the sender waits for
-        # its ack forever, and the job hangs. vLLM shares one Parameter for
-        # both names, so sending embed_tokens alone updates lm_head too.
-        from transformers import AutoConfig
-        from verl.workers.rollout.utils import ensure_async_iterator
-        if AutoConfig.from_pretrained(self.config.model.path).tie_word_embeddings:
-            update_weights = self.rollout.update_weights
-
-            async def drop_tied_lm_head(weights):
-                async for name, w in ensure_async_iterator(weights):
-                    if name != "lm_head.weight":
-                        yield name, w
-
-            self.rollout.update_weights = lambda weights, **kw: update_weights(
-                drop_tied_lm_head(weights), **kw)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def reset_optimizer(self):
@@ -699,7 +643,6 @@ class SGSRunner:
     be driven from inside a Ray actor, cf. verl.trainer.main_ppo_v0.TaskRunner)."""
 
     def run(self, args):
-        from datasets import load_dataset
         from tqdm import tqdm
         from transformers import AutoTokenizer
         from verl.single_controller.ray import RayResourcePool
@@ -709,8 +652,7 @@ class SGSRunner:
         (out_dir / "samples").mkdir(parents=True, exist_ok=True)
         (out_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
 
-        targets = [list(row["list"]) for row in
-                   load_dataset("json", data_files=args.dataset, split="train")]
+        targets = load_targets(args.dataset)
         solved = [False] * len(targets)
         print(f"[data] {len(targets)} targets from {args.dataset}", flush=True)
 
@@ -784,16 +726,8 @@ class SGSRunner:
 
 
 def main():
-    from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-
     args = parse_args()
-    repo_root = str(Path(__file__).resolve().parents[1])
-    runtime_env = get_ppo_ray_runtime_env()
-    runtime_env["env_vars"].update({
-        "PYTHONPATH": repo_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
-        **{k: os.environ[k] for k in ("HF_HOME", "WANDB_API_KEY") if k in os.environ},
-    })
-    ray.init(runtime_env=runtime_env)
+    ray.init(runtime_env=ray_runtime_env())
     ray.get(SGSRunner.remote().run.remote(args))
 
 
