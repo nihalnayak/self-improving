@@ -685,7 +685,7 @@ class SGSRunner:
         if args.eval_every:
             ev = run_eval(0)
             if wandb is not None:
-                wandb.log(ev, step=0)
+                wandb.log(ev, step=0, commit=True)
 
         pbar = tqdm(total=args.iters, desc="Training Progress")
         for t in range(1, args.iters + 1):
@@ -714,7 +714,7 @@ class SGSRunner:
             with open(out_dir / "samples" / f"iter_{t:04d}.json", "w") as f:
                 json.dump(samples, f, indent=1)
             if wandb is not None:
-                wandb.log(metrics, step=t)
+                wandb.log(metrics, step=t, commit=True)
             pbar.set_postfix(solve_rate=f"{metrics['cumulative_solve_rate']:.3f}",
                              n_train=metrics["solver/n_train_rollouts"],
                              iter_sec=f"{metrics['time/iter_sec']:.0f}")
