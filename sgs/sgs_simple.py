@@ -40,6 +40,7 @@ Usage (4 GPUs; see files/scripts/sgs/sgs_simple.sbatch):
 """
 
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -88,6 +89,9 @@ def parse_args(argv=None):
                     help="keep FSDP params and optimizer on GPU (no CPU offload)")
     ap.add_argument("--model-dtype", choices=["fp32", "bf16"], default="fp32",
                     help="dtype of FSDP master weights, grads and optimizer state")
+    ap.add_argument("--reset-optimizer", action="store_true",
+                    help="fresh Adam state (m, v, step) before each update, i.e. every "
+                         "iteration (authors' code: reset_trainer=True)")
     ap.add_argument("--save-every", type=int, default=5, help="0 = only at the end")
     ap.add_argument("--eval-every", type=int, default=1,
                     help="per-length pass@5 on targets every N iters (and at iter 0); 0 = off")
@@ -351,6 +355,12 @@ class TaggedActorRolloutWorker(ActorRolloutRefWorker):
             self.rollout.update_weights = lambda weights, **kw: update_weights(
                 drop_tied_lm_head(weights), **kw)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def reset_optimizer(self):
+        # torch AdamW re-creates per-param state lazily when it's empty, and verl's
+        # optimizer offload/load helpers skip an empty state.
+        self.actor.engine.optimizer.state.clear()
+
 
 def build_verl_config(args, tag, response_length):
     """verl's default ppo_trainer config with our overrides, one copy per model."""
@@ -523,6 +533,9 @@ class Policy:
         return {k: float(np.mean(v)) if isinstance(v, (list, tuple)) else float(v)
                 for k, v in metrics.items()}
 
+    def reset_optimizer(self):
+        self.wg.reset_optimizer()
+
     def save(self, path, step):
         self.wg.save_checkpoint(local_path=str(path), global_step=step, max_ckpt_to_keep=None)
 
@@ -531,9 +544,28 @@ class Policy:
 # §5 SGS iteration (paper Algorithm 1)
 # =============================================================================
 
+from verl.utils.profiler.performance import simple_timer  # noqa: E402
+
+
+@contextmanager
+def phase(t, name, timing, msg):
+    """Log start/end of one phase and accumulate its seconds into timing[name]."""
+    print(f"[iter {t}] {name}: {msg}", flush=True)
+    with simple_timer(name, timing):
+        yield
+    print(f"[iter {t}] {name} done in {timing[name]:.1f}s", flush=True)
+
+
+def response_stats(rollouts):
+    """(mean response length, fraction that hit the max response length)."""
+    lens = rollouts.batch["response_mask"].sum(-1).float()
+    max_len = rollouts.batch["responses"].shape[1]
+    return float(lens.mean()), float((lens >= max_len).float().mean())
+
+
 def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
     """Run one SGS iteration in place on `solved`. Returns (metrics, sample records)."""
-    m = {}
+    m, timing = {}, {}
 
     # --- step 1: batch B, split into solved / unsolved -----------------------
     ids = list(range(len(targets)))
@@ -542,9 +574,11 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
     unsolved = [i for i in ids if not solved[i]]
 
     # --- step 2: one conjecture per unsolved target --------------------------
-    conj_rollouts, conj_texts = (conj.generate(
-        [conj_messages(targets[i], args.lo, args.hi) for i in unsolved], n=1, step=t)
-        if unsolved else (None, []))
+    conj_rollouts, conj_texts = None, []
+    if unsolved:
+        with phase(t, "conj_gen", timing, f"{len(unsolved)} prompts"):
+            conj_rollouts, conj_texts = conj.generate(
+                [conj_messages(targets[i], args.lo, args.hi) for i in unsolved], n=1, step=t)
     conjs = []   # one record per unsolved target, aligned with conj_rollouts rows
     for i, text in zip(unsolved, conj_texts):
         statement, xs = parse_conjecture(text)
@@ -556,7 +590,9 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
     # --- step 3: k Solver rollouts on B ∪ B_synth, binary verification -------
     problems = [targets[i] for i in ids] + [c["problem"] for c in synth]
     k = args.k
-    sol_rollouts, sol_texts = solver.generate([solver_messages(p) for p in problems], n=k, step=t)
+    with phase(t, "solver_gen", timing,
+               f"{len(problems)} problems x {k} = {len(problems) * k} rollouts"):
+        sol_rollouts, sol_texts = solver.generate([solver_messages(p) for p in problems], n=k, step=t)
     v = np.array([float(parse_sorted(sol_texts[j]) == sorted(problems[j // k]))
                   for j in range(len(sol_texts))])
     rates = v.reshape(len(problems), k).mean(axis=1)
@@ -568,8 +604,9 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
 
     # --- step 4: Guide scores each (target, conjecture) pair -----------------
     if synth:
-        _, guide_texts = guide.generate(
-            [guide_messages(c["target"], c["statement"]) for c in synth], n=1, step=t)
+        with phase(t, "guide_gen", timing, f"{len(synth)} pairs"):
+            _, guide_texts = guide.generate(
+                [guide_messages(c["target"], c["statement"]) for c in synth], n=1, step=t)
         for c, text in zip(synth, guide_texts):
             c["guide_completion"] = text
             c["guide_scores"] = parse_guide(text)
@@ -588,18 +625,36 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
     # --- step 6: Solver REINFORCE½ (problems with s <= 0.5, A = v) -----------
     hard = np.repeat(rates <= args.solve_rate_max, k)
     rows = np.nonzero(hard)[0]
+    m["solver/n_opt_steps"] = 0
     if v[rows].sum() > 0:
-        m.update({f"solver/{key}": val for key, val in solver.update(sol_rollouts, rows, v[rows]).items()})
+        steps = math.ceil(len(rows) / solver.mini_batch_size)
+        with phase(t, "solver_update", timing, f"{len(rows)} rows -> {steps} optimizer steps "
+                   f"(mini-batch {solver.mini_batch_size})"):
+            if args.reset_optimizer:
+                solver.reset_optimizer()
+            m.update({f"solver/{key}": val for key, val in solver.update(sol_rollouts, rows, v[rows]).items()})
+        m["solver/n_opt_steps"] = steps
     m["solver/n_train_rollouts"] = len(rows)
     m["solver/n_train_correct"] = int(v[rows].sum())
 
     # --- step 7: Conjecturer REINFORCE (A = normalized R_synth) --------------
+    m["conj/n_opt_steps"] = 0
     if r_synth.sum() > 0:
-        m.update({f"conj/{key}": val for key, val in
-                  conj.update(conj_rollouts, np.arange(len(conjs)), r_synth).items()})
+        steps = math.ceil(len(conjs) / conj.mini_batch_size)
+        with phase(t, "conj_update", timing, f"{len(conjs)} rows -> {steps} optimizer steps "
+                   f"(mini-batch {conj.mini_batch_size})"):
+            if args.reset_optimizer:
+                conj.reset_optimizer()
+            m.update({f"conj/{key}": val for key, val in
+                      conj.update(conj_rollouts, np.arange(len(conjs)), r_synth).items()})
+        m["conj/n_opt_steps"] = steps
 
     # --- metrics -------------------------------------------------------------
     n_t = len(ids)
+    m.update({f"timing_s/{key}": val for key, val in timing.items()})
+    m["solver/response_len_mean"], m["solver/response_clip_frac"] = response_stats(sol_rollouts)
+    if conj_rollouts is not None:
+        m["conj/response_len_mean"], m["conj/response_clip_frac"] = response_stats(conj_rollouts)
     m.update({
         "cumulative_solve_rate": float(np.mean(solved)),
         "targets/batch_size": n_t,
@@ -645,6 +700,7 @@ class SGSRunner:
 
     def run(self, args):
         from datasets import load_dataset
+        from tqdm import tqdm
         from transformers import AutoTokenizer
         from verl.single_controller.ray import RayResourcePool
 
@@ -689,11 +745,20 @@ class SGSRunner:
             if wandb is not None:
                 wandb.log(ev, step=0)
 
+        pbar = tqdm(total=args.iters, desc="Training Progress")
         for t in range(1, args.iters + 1):
             t0 = time.time()
             metrics, samples = sgs_iteration(t, args, targets, solved, solver, conj, guide, rng)
+            timing = {}
             if args.eval_every and t % args.eval_every == 0:
-                metrics.update(run_eval(t))
+                with simple_timer("eval", timing):
+                    metrics.update(run_eval(t))
+            if (args.save_every and t % args.save_every == 0) or t == args.iters:
+                with simple_timer("save", timing):
+                    for tag in ("solver", "conj"):
+                        policies[tag].save(out_dir / "ckpt" / f"iter_{t:04d}" / tag, t)
+                    (out_dir / "solved.json").write_text(json.dumps(solved))
+            metrics.update({f"timing_s/{key}": val for key, val in timing.items()})
             metrics["iter"], metrics["time/iter_sec"] = t, time.time() - t0
             print(f"[iter {t}] " + " ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
                                             for k, v in sorted(metrics.items())), flush=True)
@@ -708,10 +773,11 @@ class SGSRunner:
                 json.dump(samples, f, indent=1)
             if wandb is not None:
                 wandb.log(metrics, step=t)
-            if (args.save_every and t % args.save_every == 0) or t == args.iters:
-                for tag in ("solver", "conj"):
-                    policies[tag].save(out_dir / "ckpt" / f"iter_{t:04d}" / tag, t)
-                (out_dir / "solved.json").write_text(json.dumps(solved))
+            pbar.set_postfix(solve_rate=f"{metrics['cumulative_solve_rate']:.3f}",
+                             n_train=metrics["solver/n_train_rollouts"],
+                             iter_sec=f"{metrics['time/iter_sec']:.0f}")
+            pbar.update(1)
+        pbar.close()
 
         if wandb is not None:
             wandb.finish()
