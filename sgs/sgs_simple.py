@@ -541,7 +541,7 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
                   for j in range(len(sol_texts))])
     rates = v.reshape(len(problems), k).mean(axis=1)
     for pos, i in enumerate(ids):
-        solved[i] = solved[i] or rates[pos] > 0
+        solved[i] = solved[i] or bool(rates[pos] > 0)
     synth_rates = rates[len(ids):]
     for c, s in zip(synth, synth_rates):
         c["solve_rate"] = float(s)
