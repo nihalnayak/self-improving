@@ -84,6 +84,8 @@ def parse_args(argv=None):
     ap.add_argument("--conj-response-length", type=int, default=2048)
     ap.add_argument("--guide-response-length", type=int, default=2048)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.6)
+    ap.add_argument("--no-offload", action="store_true",
+                    help="keep FSDP params and optimizer on GPU (no CPU offload)")
     ap.add_argument("--save-every", type=int, default=5, help="0 = only at the end")
     ap.add_argument("--eval-every", type=int, default=1,
                     help="per-length pass@5 on targets every N iters (and at iter 0); 0 = off")
@@ -376,9 +378,9 @@ def build_verl_config(args, tag, response_length):
         f"{a}.ppo_mini_batch_size={args.mini_batch_size}",
         f"{a}.ppo_micro_batch_size_per_gpu={args.micro_batch_size_per_gpu}",
         f"{a}.use_dynamic_bsz=false",
-        # --- memory: three 4B models share the GPUs, so offload when idle ---
-        f"{a}.fsdp_config.param_offload=true",
-        f"{a}.fsdp_config.optimizer_offload=true",
+        # --- memory: three models share the GPUs, so offload when idle (unless --no-offload) ---
+        f"{a}.fsdp_config.param_offload={not args.no_offload}",
+        f"{a}.fsdp_config.optimizer_offload={not args.no_offload}",
         f"{a}.checkpoint.save_contents=[model,optimizer,extra,hf_model]",
         # --- rollout: hybrid vLLM, one replica per GPU ---
         f"{r}.name=vllm",
