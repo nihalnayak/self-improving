@@ -98,6 +98,8 @@ def parse_args(argv=None):
     ap.add_argument("--save-every", type=int, default=5, help="0 = only at the end")
     ap.add_argument("--eval-every", type=int, default=1,
                     help="per-length pass@5 on targets every N iters (and at iter 0); 0 = off")
+    ap.add_argument("--val-dataset", default=None,
+                    help="jsonl of held-out targets; pass@5 on it at each eval")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--wandb-project", default="sgs")
     ap.add_argument("--run-name", default=None)
@@ -622,15 +624,18 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
     return m, {"conjectures": conjs, "solver_examples": solver_examples}
 
 
-def evaluate(t, targets, solver, n=5):
-    """Solver pass@n on all targets, overall and per list length (misc/sort_benchmark.py)."""
+def evaluate(t, targets, solver, n=5, prefix="eval"):
+    """Solver pass@n on all targets, overall and per list length (misc/sort_benchmark.py).
+    Returns (metrics, per-sample rows)."""
     _, texts = solver.generate([solver_messages(x) for x in targets], n=n, step=t)
     v = np.array([parse_sorted(texts[j]) == sorted(targets[j // n]) for j in range(len(texts))])
     passed = v.reshape(len(targets), n).any(axis=1)
     lens = np.array([len(x) for x in targets])
-    m = {f"eval/pass@{n}/len_{L}": float(passed[lens == L].mean()) for L in sorted(set(lens.tolist()))}
-    m[f"eval/pass@{n}/all"] = float(passed.mean())
-    return m
+    m = {f"{prefix}/pass@{n}/len_{L}": float(passed[lens == L].mean()) for L in sorted(set(lens.tolist()))}
+    m[f"{prefix}/pass@{n}/all"] = float(passed.mean())
+    rows = [{"split": prefix, "list": targets[j // n], "completion": texts[j], "correct": bool(v[j])}
+            for j in range(len(texts))]
+    return m, rows
 
 
 # =============================================================================
@@ -650,11 +655,15 @@ class SGSRunner:
         rng = random.Random(args.seed)
         out_dir = Path(args.out_dir)
         (out_dir / "samples").mkdir(parents=True, exist_ok=True)
+        (out_dir / "eval_samples").mkdir(parents=True, exist_ok=True)
         (out_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
 
         targets = load_targets(args.dataset)
         solved = [False] * len(targets)
         print(f"[data] {len(targets)} targets from {args.dataset}", flush=True)
+        val_targets = load_targets(args.val_dataset) if args.val_dataset else None
+        if val_targets:
+            print(f"[data] {len(val_targets)} val targets from {args.val_dataset}", flush=True)
 
         tok = AutoTokenizer.from_pretrained(args.model)
         # All three models share every GPU (sequential phases + vLLM sleep + FSDP offload).
@@ -676,7 +685,13 @@ class SGSRunner:
             print(f"[wandb] {wandb.run.url}", flush=True)
 
         def run_eval(t):
-            ev = evaluate(t, targets, solver)
+            ev, rows = evaluate(t, targets, solver)
+            if val_targets:
+                val_ev, val_rows = evaluate(t, val_targets, solver, prefix="val")
+                ev.update(val_ev)
+                rows += val_rows
+            with open(out_dir / "eval_samples" / f"iter_{t:04d}.jsonl", "w") as f:
+                f.writelines(json.dumps(r) + "\n" for r in rows)
             print(f"[eval {t}] " + " ".join(f"{k}={v:.4g}" for k, v in ev.items()), flush=True)
             with open(out_dir / "eval_pass5.jsonl", "a") as f:
                 f.write(json.dumps({"iter": t, **ev}) + "\n")
