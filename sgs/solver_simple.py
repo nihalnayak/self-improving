@@ -42,8 +42,8 @@ def parse_args(argv=None):
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--n-gpus", type=int, default=4)
     ap.add_argument("--adv-estimator", choices=["grpo", "reinforce_plus_plus"], default="grpo")
-    ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--train-batch-size", type=int, default=256, help="prompts per training step")
+    ap.add_argument("--epochs", type=int, default=1)
+    ap.add_argument("--train-batch-size", type=int, default=32, help="prompts per training step")
     ap.add_argument("--k", type=int, default=8, help="rollouts per prompt (GRPO group size)")
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--mini-batch-size", type=int, default=32,
