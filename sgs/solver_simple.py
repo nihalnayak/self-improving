@@ -8,8 +8,12 @@ advantages, KL loss, validation, wandb/console logging, checkpoints) is verl's
 
     jsonl -> out_dir/data/train.parquet   one row per target, also used as val
     reward = compute_score below          1 if parse_sorted(answer) == sorted(list)
-    val metrics                           per length: val-core/sort_len_{L}/acc/...
-                                          (best@5 is verl's bootstrap estimate of pass@5)
+    --val-dataset jsonl -> data/val.parquet  held-out targets (data_source val_sort_len_{L})
+    eval/pass@5/{len_L,all}               exact pass@5 on the targets, as in sgs_simple
+    val/pass@5/{len_L,all}                exact pass@5 on the val targets
+    eval_samples/{step}.jsonl             every val generation (verl validation_data_dir)
+    val-core/sort_len_{L}/acc/...         verl's own val metrics: mean@5 ~ pass@1; best@5 is a
+                                          bootstrap (with replacement) estimate, biased low
 
 Notes:
     - trainer.use_v1=false: verl's V1 trainer needs `transfer_queue`, which this
@@ -27,8 +31,10 @@ Usage (4 GPUs; see files/scripts/sgs/{grpo,reinforce}_sorting_qwen3_*.sbatch):
 import argparse
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import ray
 
 from sgs.common import (PatchedActorRolloutRefWorker, load_targets, parse_sorted,
@@ -60,8 +66,11 @@ def parse_args(argv=None):
     ap.add_argument("--model-dtype", choices=["fp32", "bf16"], default="fp32",
                     help="dtype of FSDP master weights, grads and optimizer state")
     ap.add_argument("--save-every", type=int, default=0, help="training steps; 0 = only at the end")
-    ap.add_argument("--eval-every", type=int, default=1,
-                    help="pass@5 on targets every N training steps (and before training); 0 = off")
+    ap.add_argument("--eval-every", type=int, default=None,
+                    help="pass@5 on targets every N training steps (and before training); "
+                         "default: once per epoch (like sgs_simple's once per iteration); 0 = off")
+    ap.add_argument("--val-dataset", default=None,
+                    help="jsonl of held-out targets; pass@5 on it at each eval")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--wandb-project", default="sgs")
     ap.add_argument("--run-name", default=None)
@@ -69,11 +78,11 @@ def parse_args(argv=None):
     return ap.parse_known_args(argv)
 
 
-def write_parquet(targets, path):
+def write_parquet(targets, path, source_prefix=""):
     """verl RL dataset: chat prompt, per-length data_source, sorted list as ground truth."""
     from datasets import Dataset
     rows = [{"prompt": solver_messages(xs),
-             "data_source": f"sort_len_{len(xs)}",
+             "data_source": f"{source_prefix}sort_len_{len(xs)}",
              "reward_model": {"style": "rule", "ground_truth": sorted(xs)},
              "extra_info": {"index": i}}
             for i, xs in enumerate(targets)]
@@ -85,7 +94,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kw
     return float(parse_sorted(solution_str) == [int(x) for x in ground_truth])
 
 
-def build_config(args, data_path, hydra_overrides):
+def build_config(args, data_path, val_paths, hydra_overrides):
     """verl's default ppo_trainer config with GRPO + our overrides."""
     import verl
     from hydra import compose, initialize_config_dir
@@ -97,7 +106,7 @@ def build_config(args, data_path, hydra_overrides):
     overrides = [
         # --- data ---
         f"data.train_files={data_path}",
-        f"data.val_files={data_path}",
+        f"data.val_files=[{','.join(map(str, val_paths))}]",
         f"data.train_batch_size={args.train_batch_size}",
         f"data.max_prompt_length={args.prompt_length}",
         f"data.max_response_length={args.response_length}",
@@ -161,6 +170,7 @@ def build_config(args, data_path, hydra_overrides):
         f"trainer.project_name={args.wandb_project}",
         f"trainer.experiment_name={args.run_name or Path(args.out_dir).name}",
         f"trainer.default_local_dir={Path(args.out_dir).resolve() / 'ckpt'}",
+        f"trainer.validation_data_dir={Path(args.out_dir).resolve() / 'eval_samples'}",
         f"trainer.n_gpus_per_node={args.n_gpus}",
         "trainer.nnodes=1",
         f"trainer.total_epochs={args.epochs}",
@@ -178,6 +188,34 @@ def build_config(args, data_path, hydra_overrides):
 
 
 from verl.trainer.main_ppo_v0 import TaskRunner  # noqa: E402
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer  # noqa: E402
+
+_orig_val_metrics_update = RayPPOTrainer._val_metrics_update
+
+
+def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
+    """verl's val metrics + exact pass@n per length and overall, as in sgs_simple.evaluate."""
+    m = _orig_val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+    acc = reward_extra_infos_dict.get("acc") or reward_extra_infos_dict["reward"]
+    passed, src = defaultdict(bool), {}
+    for ds, uid, a in zip(data_sources, sample_uids, acc):
+        passed[uid] |= bool(a > 0.5)
+        src[uid] = ds
+    n = self.config.actor_rollout_ref.rollout.val_kwargs.n
+    # data_source is sort_len_{L} (train targets -> eval/) or val_sort_len_{L} (-> val/)
+    for prefix, split in (("", "eval"), ("val_", "val")):
+        uids = [u for u, s in src.items() if s.startswith(f"{prefix}sort_len_")]
+        if not uids:
+            continue
+        for L in sorted({int(src[u].split("_")[-1]) for u in uids}):
+            m[f"{split}/pass@{n}/len_{L}"] = float(np.mean(
+                [passed[u] for u in uids if src[u] == f"{prefix}sort_len_{L}"]))
+        m[f"{split}/pass@{n}/all"] = float(np.mean([passed[u] for u in uids]))
+    return m
+
+
+# Patched in the TaskRunner actor too: Ray imports this module there to load SolverTaskRunner.
+RayPPOTrainer._val_metrics_update = _val_metrics_update
 
 
 @ray.remote(num_cpus=1)
@@ -197,15 +235,25 @@ def main():
     args, hydra_overrides = parse_args()
     out_dir = Path(args.out_dir)
     (out_dir / "data").mkdir(parents=True, exist_ok=True)
-    (out_dir / "args.json").write_text(json.dumps(
-        {**vars(args), "hydra_overrides": hydra_overrides}, indent=2))
 
     targets = load_targets(args.dataset)
+    if args.eval_every is None:
+        # verl's train dataloader drops the last partial batch
+        args.eval_every = max(1, len(targets) // args.train_batch_size)
+    (out_dir / "args.json").write_text(json.dumps(
+        {**vars(args), "hydra_overrides": hydra_overrides}, indent=2))
     data_path = (out_dir / "data" / "train.parquet").resolve()
     write_parquet(targets, data_path)
     print(f"[data] {len(targets)} targets from {args.dataset} -> {data_path}", flush=True)
+    val_paths = [data_path]
+    if args.val_dataset:
+        val_targets = load_targets(args.val_dataset)
+        val_paths.append((out_dir / "data" / "val.parquet").resolve())
+        write_parquet(val_targets, val_paths[-1], source_prefix="val_")
+        print(f"[data] {len(val_targets)} val targets from {args.val_dataset} -> {val_paths[-1]}",
+              flush=True)
 
-    cfg = build_config(args, data_path, hydra_overrides)
+    cfg = build_config(args, data_path, val_paths, hydra_overrides)
     ray.init(runtime_env=ray_runtime_env())
     run_ppo(cfg, task_runner_class=SolverTaskRunner)
 
