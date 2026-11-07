@@ -1,4 +1,5 @@
-"""GRPO baseline for SGS on sorting: verl's own PPO trainer with adv_estimator=grpo.
+"""Solver-only baselines for SGS on sorting: verl's own PPO trainer with
+adv_estimator=grpo (GRPO, default) or reinforce_plus_plus (REINFORCE++).
 
 Only the Solver is trained, on the same targets, prompt and verifier as
 sgs_simple (shared through sgs/common.py). Everything else (rollout, group
@@ -18,9 +19,9 @@ Notes:
     - Unknown CLI args are passed through as Hydra overrides, e.g.
       `trainer.total_training_steps=3`.
 
-Usage (4 GPUs; see files/scripts/sgs/grpo_sorting_qwen3_*.sbatch):
-    python -m sgs.grpo_simple --dataset files/data/sorting/sorting_1000.jsonl \
-        --out-dir runs/grpo_simple --n-gpus 4
+Usage (4 GPUs; see files/scripts/sgs/{grpo,reinforce}_sorting_qwen3_*.sbatch):
+    python -m sgs.solver_simple --dataset files/data/sorting/sorting_1000.jsonl \
+        --out-dir runs/solver_simple --n-gpus 4 [--adv-estimator reinforce_plus_plus]
 """
 
 import argparse
@@ -35,13 +36,14 @@ from sgs.common import (PatchedActorRolloutRefWorker, load_targets, parse_sorted
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="GRPO baseline on sorting with verl")
+    ap = argparse.ArgumentParser(description="GRPO / REINFORCE++ baseline on sorting with verl")
     ap.add_argument("--dataset", required=True, help="jsonl with a `list` field per row")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--n-gpus", type=int, default=4)
+    ap.add_argument("--adv-estimator", choices=["grpo", "reinforce_plus_plus"], default="grpo")
     ap.add_argument("--epochs", type=int, default=30)
-    ap.add_argument("--train-batch-size", type=int, default=256, help="prompts per GRPO step")
+    ap.add_argument("--train-batch-size", type=int, default=256, help="prompts per training step")
     ap.add_argument("--k", type=int, default=8, help="rollouts per prompt (GRPO group size)")
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--mini-batch-size", type=int, default=32,
@@ -57,9 +59,9 @@ def parse_args(argv=None):
                     help="keep FSDP params and optimizer on GPU (no CPU offload)")
     ap.add_argument("--model-dtype", choices=["fp32", "bf16"], default="fp32",
                     help="dtype of FSDP master weights, grads and optimizer state")
-    ap.add_argument("--save-every", type=int, default=0, help="GRPO steps; 0 = only at the end")
+    ap.add_argument("--save-every", type=int, default=0, help="training steps; 0 = only at the end")
     ap.add_argument("--eval-every", type=int, default=1,
-                    help="pass@5 on targets every N GRPO steps (and before training); 0 = off")
+                    help="pass@5 on targets every N training steps (and before training); 0 = off")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--wandb-project", default="sgs")
     ap.add_argument("--run-name", default=None)
@@ -104,8 +106,8 @@ def build_config(args, data_path, hydra_overrides):
         # --- reward: binary verifier from this file ---
         f"reward.custom_reward_function.path={os.path.abspath(__file__)}",
         "reward.custom_reward_function.name=compute_score",
-        # --- algorithm: GRPO ---
-        "algorithm.adv_estimator=grpo",
+        # --- algorithm: GRPO or REINFORCE++ ---
+        f"algorithm.adv_estimator={args.adv_estimator}",
         "algorithm.use_kl_in_reward=false",
         # --- model ---
         f"actor_rollout_ref.model.path={args.model}",
@@ -179,7 +181,7 @@ from verl.trainer.main_ppo_v0 import TaskRunner  # noqa: E402
 
 
 @ray.remote(num_cpus=1)
-class GRPOTaskRunner(TaskRunner.__ray_metadata__.modified_class):
+class SolverTaskRunner(TaskRunner.__ray_metadata__.modified_class):
     """verl's v0 TaskRunner, but registering our patched actor/rollout/ref worker."""
 
     def add_actor_rollout_worker(self, config):
@@ -205,11 +207,11 @@ def main():
 
     cfg = build_config(args, data_path, hydra_overrides)
     ray.init(runtime_env=ray_runtime_env())
-    run_ppo(cfg, task_runner_class=GRPOTaskRunner)
+    run_ppo(cfg, task_runner_class=SolverTaskRunner)
 
 
 if __name__ == "__main__":
     # Re-import under the package name so Ray pickles our classes by reference
-    # (`sgs.grpo_simple.X`) instead of by value from `__main__`.
-    from sgs import grpo_simple
-    grpo_simple.main()
+    # (`sgs.solver_simple.X`) instead of by value from `__main__`.
+    from sgs import solver_simple
+    solver_simple.main()

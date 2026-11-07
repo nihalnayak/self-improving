@@ -1,4 +1,4 @@
-"""Primitives shared by sgs_simple (SGS) and grpo_simple (GRPO baseline).
+"""Primitives shared by sgs_simple (SGS) and solver_simple (GRPO / REINFORCE++ baselines).
 
     Solver prompt + verifier    misc/sort_benchmark.py prompt and answer parser
     load_targets                sorting jsonl -> list of integer lists
