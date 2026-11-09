@@ -84,9 +84,9 @@ def parse_args(argv=None):
     ap.add_argument("--thinking", action="store_true",
                     help="enable_thinking=True in the chat template (all three models)")
     ap.add_argument("--prompt-length", type=int, default=2048)
-    ap.add_argument("--solver-response-length", type=int, default=4096)
-    ap.add_argument("--conj-response-length", type=int, default=2048)
-    ap.add_argument("--guide-response-length", type=int, default=2048)
+    ap.add_argument("--solver-response-length", type=int, default=1024)
+    ap.add_argument("--conj-response-length", type=int, default=1024)
+    ap.add_argument("--guide-response-length", type=int, default=1024)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.6)
     ap.add_argument("--no-offload", action="store_true",
                     help="keep FSDP params and optimizer on GPU (no CPU offload)")
