@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REMOTE="${OVERLEAF_REMOTE:-overleaf}"
-BRANCH=master   # Overleaf's git bridge only has `master`
+BRANCH="${OVERLEAF_BRANCH:-main}"   # GitHub-synced Overleaf uses `main`; git bridge uses `master`
 PREFIX=paper
 
 cd "$(git rev-parse --show-toplevel)"
