@@ -445,11 +445,13 @@ class Policy:
         return out, texts
 
     # ---- training ----------------------------------------------------------
-    def update(self, rollouts, rows, advantages):
+    def update(self, rollouts, rows, advantages, ref_log_probs=None):
         """One REINFORCE pass over `rollouts[rows]` with per-sequence `advantages`.
 
         Rows are padded up to a multiple of the optimizer mini-batch with
-        zero-advantage copies (no gradient). Returns verl's actor metrics.
+        zero-advantage copies (no gradient). `ref_log_probs` (per-token, aligned
+        with `rollouts`) feeds verl's KL loss when `use_kl_loss=true`.
+        Returns verl's actor metrics.
         """
         from verl import DataProto
         from verl.protocol import pad_dataproto_to_divisor
@@ -464,6 +466,8 @@ class Policy:
         tensors["advantages"] = adv * tensors["response_mask"].float()
         # gpg ignores old_log_probs (no ratio), but verl's ppo_loss requires the key.
         tensors["old_log_probs"] = sel.batch["rollout_log_probs"].float()
+        if ref_log_probs is not None:
+            tensors["ref_log_prob"] = ref_log_probs[torch.as_tensor(rows, dtype=torch.long)].float()
         data = DataProto.from_dict(tensors=tensors,
                                    meta_info={"temperature": 1.0, "multi_turn": False})
         data, pad = pad_dataproto_to_divisor(data, self.mini_batch_size)
