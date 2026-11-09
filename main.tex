@@ -1,14 +1,59 @@
-\documentclass{article}
-\usepackage{graphicx} % Required for inserting images
+%%%%%%%% ICML 2026 SUBMISSION (from the official icml2026 kit; see example_paper.tex) %%%%%%%%
 
-\title{self-improving-draft}
-\author{nihal_vivekanand_nayak }
-\date{November 2026}
+\documentclass{article}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+% Attempt to make hyperref and algorithmic work together better:
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+% Blind submission. Preprint: [preprint]; camera-ready: [accepted].
+\usepackage{icml2026}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+\usepackage[capitalize,noabbrev]{cleveref}
+\usepackage[textsize=tiny]{todonotes}
+
+\input{macros}
+
+\icmltitlerunning{TODO: Running Title}
 
 \begin{document}
 
-\maketitle
+\twocolumn[
+  \icmltitle{TODO: Title}
 
-\section{Introduction}
+  \icmlsetsymbol{equal}{*}
+
+  \begin{icmlauthorlist}
+    \icmlauthor{Firstname1 Lastname1}{yyy}
+  \end{icmlauthorlist}
+
+  \icmlaffiliation{yyy}{Department of XXX, University of YYY, Location, Country}
+
+  \icmlcorrespondingauthor{Firstname1 Lastname1}{first1.last1@xxx.edu}
+
+  \icmlkeywords{Machine Learning, ICML}
+
+  \vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}  % no special notice (required even if empty)
+
+\begin{abstract}
+  TODO.
+\end{abstract}
+
+\input{sections/algorithms}
+
+\bibliography{references}
+\bibliographystyle{icml2026}
 
 \end{document}

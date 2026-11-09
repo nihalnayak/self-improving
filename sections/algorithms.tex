@@ -1,0 +1,163 @@
+\section{Algorithms}
+\label{sec:algorithms}
+
+We use the notation of SGS~\citep{bailey2026scaling}: Solver $\solver$,
+Conjecturer $\conj$, frozen Guide $\guide$, target dataset $\D$, batch
+$\B \subseteq \D$, synthetic problems $\xt \sim \conj(\cdot \mid x)$, $k$
+solutions $y_x^1,\dots,y_x^k$ per problem with verifier $v(y) \in \{0,1\}$,
+and solve rate $s(x) = \frac{1}{k}\sum_{i=1}^{k} v(y_x^i)$.
+\Cref{alg:sgs} restates SGS. \Cref{alg:sgs-grpo,alg:sgs-grpo-onpolicy}
+replace its Solver update with GRPO~\citep{shao2024deepseekmath}; the
+Conjecturer update is unchanged.
+
+\paragraph{GRPO objective.}
+For a problem $x$ with rollout group $\{y_i\}_{i=1}^{k} \sim \solverold(\cdot \mid x)$,
+where $y_i = (y_{i,1},\dots,y_{i,|y_i|})$, let
+\begin{equation}
+  \Ahat_i = \frac{v(y_i) - \mean\big(\{v(y_j)\}_{j=1}^{k}\big)}
+                 {\std\big(\{v(y_j)\}_{j=1}^{k}\big)},
+  \qquad
+  w_{i,t} = \frac{\solver\big(y_{i,t} \mid x, y_{i,<t}\big)}
+                 {\solverold\big(y_{i,t} \mid x, y_{i,<t}\big)}
+  \label{eq:grpo-adv}
+\end{equation}
+be the group-relative advantage and token-level importance weight. With the
+PPO clipped surrogate~\citep{schulman2017proximal}, clip range $\epsilon$, and
+a KL penalty of weight $\beta$ towards the frozen Guide $\guide$ (which shares
+the Solver's initial weights, so it serves as the reference policy), the Solver
+loss on a mini-batch $\B_m$ is
+\begin{equation}
+\begin{split}
+  \Lgrpo(\theta; \B_m) = -\frac{1}{T_m} \sum_{x \in \B_m} \sum_{i=1}^{k} \sum_{t=1}^{|y_i|}
+  \Big( &\min\big( w_{i,t} \Ahat_i,\; \clip(w_{i,t}, 1-\epsilon, 1+\epsilon)\, \Ahat_i \big) \\
+  &- \beta\, \mathbb{D}_{i,t} \Big),
+\end{split}
+\label{eq:grpo}
+\end{equation}
+where $\{y_i\}_{i=1}^{k} \sim \solverold(\cdot \mid x)$ is the group of $x$,
+$T_m = \sum_{x \in \B_m} \sum_{i=1}^{k} |y_i|$ is the number of response tokens
+in the mini-batch, and
+\begin{equation}
+  \mathbb{D}_{i,t} = \frac{\guide(y_{i,t} \mid x, y_{i,<t})}{\solver(y_{i,t} \mid x, y_{i,<t})}
+  - \log \frac{\guide(y_{i,t} \mid x, y_{i,<t})}{\solver(y_{i,t} \mid x, y_{i,<t})} - 1
+  \label{eq:kl}
+\end{equation}
+is the per-token KL estimate to the Guide. $\solverold$ is the Solver that
+sampled the rollouts. Groups with
+$s(x) \in \{0, 1\}$ have $\Ahat_i = 0$ and contribute only through the KL
+term. In our implementation, $\epsilon = 0.2$, $\beta = 10^{-3}$, $k = 8$,
+and each mini-batch $\B_m$ has $M = 32$ problems ($Mk = 256$ sequences).
+
+\paragraph{Conjecturer reward.}
+As in SGS, $\Rsynth = \Rsolve \cdot \Rguide$ is linearly normalized to
+$[0,1]$ within the batch,
+$\minmax(r_i) = (r_i - \min_j r_j) / (\max_j r_j - \min_j r_j)$, and the
+Conjecturer is updated with REINFORCE using this reward.
+
+\paragraph{Variants.}
+\emph{All targets}: when enabled, a synthetic problem is generated for every
+$x \in \B$ rather than only for $x \in \Bunsolved$.
+\emph{Optimizer reset}: when enabled, the Adam state of $\solver$ and $\conj$
+is reset at the start of every iteration.
+
+\begin{algorithm}[tb]
+  \caption{SGS~\citep{bailey2026scaling}}
+  \label{alg:sgs}
+  \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} Dataset $\D$, Solver $\solver$, Conjecturer $\conj$, Guide $\guide$
+    \STATE Initialize all problems in $\D$ as unsolved
+    \FOR{iteration $t = 1, 2, \ldots$}
+      \STATE Sample batch $\B \subseteq \D$
+      \STATE Split $\B$ into $\Bsolved$, $\Bunsolved$
+      \FOR{each $x \in \Bunsolved$}
+        \STATE Generate $\xt \sim \conj(\cdot \mid x)$
+      \ENDFOR
+      \STATE Collect synthetic set $\Bsynth$
+      \FOR{each problem $x \in \B \cup \Bsynth$}
+        \STATE Sample $k$ solutions from $\solver$
+        \STATE Verify each solution $v(y_x^i) \in \{0,1\}$
+      \ENDFOR
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE $s(\xt) \leftarrow$ solve rate of $\xt$
+        \STATE $\text{ind} \leftarrow \mathbf{1}[\, s(\xt) \neq 0 \land s(\xt) \text{ in bottom } 70\% \,]$
+        \STATE $\Rsolve \leftarrow \text{ind} \cdot (1 - s(\xt))$
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
+      \STATE Update Solver $\solver$ with RL using $v(y_x^i)$
+      \STATE Update Conjecturer $\conj$ with RL using $\Rsolve \cdot \Rguide$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[tb]
+  \caption{SGS-GRPO (off-policy Solver update)}
+  \label{alg:sgs-grpo}
+  \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} Dataset $\D$, Solver $\solver$, Conjecturer $\conj$, Guide $\guide$, mini-batch size $M$
+    \STATE Initialize all problems in $\D$ as unsolved
+    \FOR{iteration $t = 1, 2, \ldots$}
+      \STATE Sample batch $\B \subseteq \D$
+      \STATE Split $\B$ into $\Bsolved$, $\Bunsolved$
+      \STATE $\mathcal{C} \leftarrow \B$ if all targets, else $\Bunsolved$
+      \FOR{each $x \in \mathcal{C}$}
+        \STATE Generate $\xt \sim \conj(\cdot \mid x)$
+      \ENDFOR
+      \STATE Collect synthetic set $\Bsynth$
+      \STATE $\theta_{\mathrm{old}} \leftarrow \theta$
+      \FOR{each problem $x \in \B \cup \Bsynth$}
+        \STATE Sample $k$ solutions from $\solverold$
+        \STATE Verify each solution $v(y_x^i) \in \{0,1\}$
+        \STATE Compute $\Ahat_i$ (\cref{eq:grpo-adv})
+      \ENDFOR
+      \STATE Mark each $x \in \B$ with $s(x) > 0$ as solved
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE $s(\xt) \leftarrow$ solve rate of $\xt$
+        \STATE $\text{ind} \leftarrow \mathbf{1}[\, s(\xt) \neq 0 \land s(\xt) \text{ in bottom } 70\% \,]$
+        \STATE $\Rsolve \leftarrow \text{ind} \cdot (1 - s(\xt))$
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
+      \STATE Reset optimizer states of $\solver$, $\conj$ (if optimizer reset)
+      \FOR{each mini-batch $\B_m$ of $M$ problems of $\B \cup \Bsynth$ (one pass)}
+        \STATE Update Solver $\solver$ with one gradient step on $\Lgrpo(\theta; \B_m)$ (\cref{eq:grpo})
+      \ENDFOR
+      \STATE Update Conjecturer $\conj$ with RL using $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[tb]
+  \caption{SGS-GRPO (on-policy Solver update)}
+  \label{alg:sgs-grpo-onpolicy}
+  \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} Dataset $\D$, Solver $\solver$, Conjecturer $\conj$, Guide $\guide$, mini-batch size $M$
+    \STATE Initialize all problems in $\D$ as unsolved
+    \FOR{iteration $t = 1, 2, \ldots$}
+      \STATE Sample batch $\B \subseteq \D$
+      \STATE Split $\B$ into $\Bsolved$, $\Bunsolved$
+      \STATE $\mathcal{C} \leftarrow \B$ if all targets, else $\Bunsolved$
+      \FOR{each $x \in \mathcal{C}$}
+        \STATE Generate $\xt \sim \conj(\cdot \mid x)$
+      \ENDFOR
+      \STATE Collect synthetic set $\Bsynth$
+      \STATE Reset optimizer states of $\solver$, $\conj$ (if optimizer reset)
+      \FOR{each mini-batch $\B_m$ of $M$ problems of shuffled $\B \cup \Bsynth$}
+        \STATE $\theta_{\mathrm{old}} \leftarrow \theta$
+        \FOR{each problem $x \in \B_m$}
+          \STATE Sample $k$ solutions from $\solverold$
+          \STATE Verify each solution $v(y_x^i) \in \{0,1\}$
+          \STATE Compute $\Ahat_i$ (\cref{eq:grpo-adv})
+        \ENDFOR
+        \STATE Update Solver $\solver$ with one gradient step on $\Lgrpo(\theta; \B_m)$ (\cref{eq:grpo})
+      \ENDFOR
+      \STATE Mark each $x \in \B$ with $s(x) > 0$ as solved
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE Sample $k$ solutions from the updated $\solver$ and verify them
+        \STATE $s(\xt) \leftarrow$ solve rate of $\xt$
+        \STATE $\text{ind} \leftarrow \mathbf{1}[\, s(\xt) \neq 0 \land s(\xt) \text{ in bottom } 70\% \,]$
+        \STATE $\Rsolve \leftarrow \text{ind} \cdot (1 - s(\xt))$
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
+      \STATE Update Conjecturer $\conj$ with RL using $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
