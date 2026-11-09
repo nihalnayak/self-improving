@@ -147,20 +147,25 @@ def grpo_advantages(v, k):
     return ((g - g.mean(axis=1, keepdims=True)) / (std + 1e-6)).reshape(-1)
 
 
-def ref_log_probs(guide, rollouts):
+def ref_log_probs(guide, rollouts, divisor):
     """Per-token log-probs of `rollouts` under the frozen Guide (= init Solver),
-    shaped like `responses` (verl ray_trainer._compute_ref_log_prob)."""
+    shaped like `responses` (verl ray_trainer._compute_ref_log_prob).
+    Rows are padded to a multiple of `divisor` (n_gpus * micro-batch per GPU,
+    required by verl's micro-batching) and the padding is sliced off after."""
     from verl import DataProto
+    from verl.protocol import pad_dataproto_to_divisor
     from verl.utils import tensordict_utils as tu
     from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
     keep = ["prompts", "responses", "response_mask", "input_ids", "attention_mask", "position_ids"]
     data = DataProto.from_dict(tensors={k: rollouts.batch[k] for k in keep},
                                meta_info={"temperature": 1.0, "multi_turn": False})
+    n = len(data)
+    data, _ = pad_dataproto_to_divisor(data, divisor)
     td = left_right_2_no_padding(data.to_tensordict())
     tu.assign_non_tensor(td, calculate_entropy=False, compute_loss=False)
     out = guide.wg.compute_log_prob(td)
-    return no_padding_2_padding(tu.get(out, "log_probs"), td).float()
+    return no_padding_2_padding(tu.get(out, "log_probs"), td).float()[:n]
 
 
 def solver_grpo_update(t, args, solver, guide, rollouts, v, timing):
@@ -174,7 +179,7 @@ def solver_grpo_update(t, args, solver, guide, rollouts, v, timing):
     ref = None
     if args.kl_coef > 0:
         with phase(t, "solver_ref", timing, f"{len(v)} rollouts (Guide = KL reference)"):
-            ref = ref_log_probs(guide, rollouts)
+            ref = ref_log_probs(guide, rollouts, args.n_gpus * args.micro_batch_size_per_gpu)
     steps = math.ceil(len(v) / solver.mini_batch_size)
     with phase(t, "solver_update", timing, f"{len(v)} rows -> {steps} optimizer steps "
                f"(mini-batch {solver.mini_batch_size})"):
