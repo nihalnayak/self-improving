@@ -13,6 +13,7 @@ Defaults produce 1000 samples balanced across lengths {8, 16, 32, 64,
 Usage:
     python misc/gen_sort_data.py
     python misc/gen_sort_data.py --seed 1 --out files/data/sorting/sorting_seed1.jsonl
+    python misc/gen_sort_data.py --n 1000 --lengths 8,16,128 --out files/data/sorting/sorting_1000_L8-16-128.jsonl
 """
 
 import argparse
@@ -37,18 +38,26 @@ def main() -> None:
                    help="comma-separated list lengths")
     p.add_argument("--per-length", type=int, default=200,
                    help="number of samples per length")
+    p.add_argument("--n", type=int, default=None,
+                   help="total samples split evenly across lengths "
+                        "(remainder to the last lengths); overrides --per-length")
     p.add_argument("--lo", type=int, default=0)
     p.add_argument("--hi", type=int, default=10000)
     args = p.parse_args()
 
     lengths = [int(x) for x in args.lengths.split(",") if x.strip()]
+    k = len(lengths)
+    if args.n is None:
+        counts = [args.per_length] * k
+    else:
+        counts = [args.n // k + (i >= k - args.n % k) for i in range(k)]
     rng = random.Random(args.seed)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with args.out.open("w") as f:
-        for L in lengths:
-            for _ in range(args.per_length):
+        for L, c in zip(lengths, counts):
+            for _ in range(c):
                 row = gen_sample(L, rng, args.lo, args.hi)
                 f.write(json.dumps(row) + "\n")
                 n += 1
