@@ -472,6 +472,9 @@ class Policy:
                                    meta_info={"temperature": 1.0, "multi_turn": False})
         data, pad = pad_dataproto_to_divisor(data, self.mini_batch_size)
         if pad:
+            # Zero advantage kills only the PG term: pad rows are copies of the
+            # first rows and still enter verl's KL loss (no advantage there), so
+            # with use_kl_loss those rows get double KL weight.
             data.batch["advantages"][-pad:] = 0.0
 
         td = left_right_2_no_padding(data.to_tensordict())
