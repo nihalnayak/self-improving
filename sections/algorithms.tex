@@ -139,6 +139,13 @@ is reset at the start of every iteration.
         \STATE Generate $\xt \sim \conj(\cdot \mid x)$
       \ENDFOR
       \STATE Collect synthetic set $\Bsynth$
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE Sample $k$ solutions from $\solver$ (before the Solver update) and verify them
+        \STATE $s(\xt) \leftarrow$ solve rate of $\xt$
+        \STATE $\text{ind} \leftarrow \mathbf{1}[\, s(\xt) \neq 0 \land s(\xt) \text{ in bottom } 70\% \,]$
+        \STATE $\Rsolve \leftarrow \text{ind} \cdot (1 - s(\xt))$
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
       \STATE Reset optimizer states of $\solver$, $\conj$ (if optimizer reset)
       \FOR{each mini-batch $\B_m$ of $M$ problems of shuffled $\B \cup \Bsynth$}
         \STATE $\theta_{\mathrm{old}} \leftarrow \theta$
@@ -150,13 +157,6 @@ is reset at the start of every iteration.
         \STATE Update Solver $\solver$ with one gradient step on $\Lgrpo(\theta; \B_m)$ (\cref{eq:grpo})
       \ENDFOR
       \STATE Mark each $x \in \B$ with $s(x) > 0$ as solved
-      \FOR{each $\xt \in \Bsynth$}
-        \STATE Sample $k$ solutions from the updated $\solver$ and verify them
-        \STATE $s(\xt) \leftarrow$ solve rate of $\xt$
-        \STATE $\text{ind} \leftarrow \mathbf{1}[\, s(\xt) \neq 0 \land s(\xt) \text{ in bottom } 70\% \,]$
-        \STATE $\Rsolve \leftarrow \text{ind} \cdot (1 - s(\xt))$
-        \STATE $\Rguide \leftarrow \guide(x, \xt)$
-      \ENDFOR
       \STATE Update Conjecturer $\conj$ with RL using $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$
     \ENDFOR
   \end{algorithmic}
