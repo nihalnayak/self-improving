@@ -10,7 +10,7 @@ mini-batch): every optimizer step uses rollouts sampled from the current weights
         GRPO advantages + Guide ref log-probs -> exactly one optimizer step
 
 Because the Solver changes across chunks, the synthetic solve rates s(x~) for
-R_solve are re-measured after the Solver phase with the trained Solver (k fresh
+R_solve are measured before the Solver phase with θ_old, as in sgs_grpo (k fresh
 rollouts per synthetic problem, `synth_eval` phase). Target `solved` tracking
 uses the training rollouts.
 
@@ -42,6 +42,16 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
     ids, unsolved, todo = batch_ids(args, targets, solved, rng)
     conj_rollouts, conjs = conjecture(t, args, targets, todo, conj, timing)
     synth = [c for c in conjs if c["problem"] is not None]
+
+    # --- pre-training solve rates s(x~) on B_synth with θ_old ----------------
+    synth_problems = [c["problem"] for c in synth]
+    synth_rates = np.zeros(0)
+    if synth:
+        with phase(t, "synth_eval", timing,
+                   f"{len(synth)} problems x {args.k} = {len(synth) * args.k} rollouts"):
+            _, texts = solver.generate([solver_messages(p) for p in synth_problems],
+                                       n=args.k, step=t)
+        synth_rates = verify(texts, synth_problems, args.k).reshape(len(synth), args.k).mean(axis=1)
 
     # --- steps 3 + 6: on-policy Solver GRPO, one optimizer step per chunk ----
     problems = [targets[i] for i in ids] + [c["problem"] for c in synth]
@@ -79,15 +89,7 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
     m["solver/response_len_mean"], m["solver/response_clip_frac"] = (
         float(np.mean(lens)) if lens else 0.0, float(np.mean(clips)) if clips else 0.0)
 
-    # --- post-training solve rates s(x~) on B_synth with the trained Solver --
-    synth_problems = [c["problem"] for c in synth]
-    synth_rates = np.zeros(0)
-    if synth:
-        with phase(t, "synth_eval", timing,
-                   f"{len(synth)} problems x {k} = {len(synth) * k} rollouts"):
-            _, texts = solver.generate([solver_messages(p) for p in synth_problems], n=k, step=t)
-        synth_rates = verify(texts, synth_problems, k).reshape(len(synth), k).mean(axis=1)
-    m["synth/mean_solve_rate_pretrain"] = float(rates[len(ids):].mean()) if synth else 0.0
+    m["synth/mean_solve_rate_train"] = float(rates[len(ids):].mean()) if synth else 0.0
 
     # --- steps 4, 5, 7: Guide, rewards, Conjecturer --------------------------
     m.update(reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, conj,
