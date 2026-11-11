@@ -1,26 +1,28 @@
 """Solver-only GRPO with the hand-rolled SGS trainer, on sorting, built on verl.
 
-`sgs.sgs_grpo` with the Conjecturer, Guide and synthetic problems removed: each
-iteration samples k rollouts per target in B from θ_old, then does one pass of
-mini-batch GRPO steps (PPO clip vs θ_old, token-mean, β·KL(π_θ || ρ) low_var_kl)
-with sgs_grpo's `solver_grpo_update`. Use it to compare the SGS Solver update
-against verl's own trainer in `sgs.solver_simple`.
+`sgs.sgs_grpo` with the Conjecturer, Guide and synthetic problems removed, run
+exactly like verl's trainer in `sgs.solver_simple` (train batch = mini-batch):
+
+    each iteration = one optimizer step, always on-policy (no stale steps):
+        B <- next --mini-batch-size targets (epoch-wise shuffle, last partial batch dropped)
+        k rollouts per target from the current weights
+        GRPO advantages; θ_old log-probs recomputed by the FSDP actor (ratio = 1)
+        one step of PPO clip, token-mean, + β·KL(π_θ || ρ) low_var_kl (`solver_grpo_update`)
+
+--iters counts optimizer steps (verl global_steps): epochs x (|D| // mini_batch_size).
 
 The KL reference ρ is a separate frozen copy of the init model (the `ref` Policy,
-loaded only when --kl-coef > 0), standing in for sgs_grpo's frozen Guide.
+loaded only when --kl-coef > 0), standing in for verl's built-in ref worker.
+Remaining differences from solver_simple: the sampler RNG (python `random`, not
+torch's generator) and the ref living in its own Policy.
 
-Differences from solver_simple that are kept by design:
-    - B defaults to the full dataset (--batch-size 0), sampled once per iteration,
-      then one epoch of mini-batch steps; later mini-batches are off-policy.
-      --batch-size 32 --mini-batch-size 32 gives one on-policy step per iteration,
-      but B is re-sampled each iteration (rng.sample), not drawn epoch-wise.
-    - Ref log-probs come from a separate Policy, not verl's built-in ref worker.
-
-Args are sgs_grpo's; the Conjecturer / Guide / --all-targets flags are ignored.
+Args are sgs_grpo's; --batch-size must be 0 or --mini-batch-size; the Conjecturer /
+Guide / --all-targets flags are ignored.
 
 Usage (4 GPUs; see files/scripts/sgs/handrolled_solver_grpo_sorting_qwen3_4b.sbatch):
     python -m sgs.handrolled_solver_grpo --dataset files/data/sorting/sorting_1000.jsonl \
-        --out-dir runs/handrolled_solver_grpo --n-gpus 4
+        --out-dir runs/handrolled_solver_grpo --n-gpus 4 --mini-batch-size 32 --iters 310 \
+        --eval-every 31 --save-every 0
 """
 
 import json
@@ -32,14 +34,14 @@ import numpy as np
 import ray
 
 from sgs.common import load_targets, parse_sorted, ray_runtime_env, solver_messages
-from sgs.sgs_grpo import batch_ids, build_configs, parse_args, solver_grpo_update, target_metrics
+from sgs.sgs_grpo import build_configs, parse_args, solver_grpo_update, target_metrics
 from sgs.sgs_simple import Policy, evaluate, phase, response_stats
 
 
-def solver_iteration(t, args, targets, solved, solver, ref, rng):
-    """One Solver-only GRPO iteration, in place on `solved`. Returns (metrics, samples)."""
+def solver_iteration(t, args, targets, ids, solved, solver, ref):
+    """One on-policy GRPO step on targets[ids], in place on `solved`. Returns (metrics, samples)."""
     m, timing = {}, {}
-    ids, unsolved, _ = batch_ids(args, targets, solved, rng)
+    unsolved = [i for i in ids if not solved[i]]
     problems = [targets[i] for i in ids]
     k = args.k
     with phase(t, "solver_gen", timing,
@@ -54,6 +56,7 @@ def solver_iteration(t, args, targets, solved, solver, ref, rng):
     if args.reset_optimizer:
         solver.reset_optimizer()
     m.update(solver_grpo_update(t, args, solver, ref, rollouts, v, timing))
+    assert m["solver/n_opt_steps"] in (0, 1), m["solver/n_opt_steps"]  # 0 = all-zero advantages
     m["solver/n_train_rollouts"] = len(v)
     m["solver/n_train_correct"] = int(v.sum())
 
@@ -126,10 +129,19 @@ class SolverRunner:
             if wandb is not None:
                 wandb.log(ev, step=0, commit=True)
 
+        # verl's train dataloader: reshuffle each epoch, drop the last partial batch.
+        B = args.mini_batch_size
+        steps_per_epoch = len(targets) // B
+        perm = list(range(len(targets)))
         pbar = tqdm(total=args.iters, desc="Training Progress")
         for t in range(1, args.iters + 1):
             t0 = time.time()
-            metrics, samples = solver_iteration(t, args, targets, solved, solver, ref, rng)
+            s = (t - 1) % steps_per_epoch
+            if s == 0:
+                rng.shuffle(perm)
+            ids = perm[s * B:(s + 1) * B]
+            metrics, samples = solver_iteration(t, args, targets, ids, solved, solver, ref)
+            metrics["epoch"] = (t - 1) // steps_per_epoch
             timing = {}
             if args.eval_every and t % args.eval_every == 0:
                 with simple_timer("eval", timing):
@@ -159,6 +171,9 @@ class SolverRunner:
 
 def main():
     args = parse_args()
+    if args.batch_size not in (0, args.mini_batch_size):
+        raise SystemExit(f"--batch-size {args.batch_size} != --mini-batch-size {args.mini_batch_size}: "
+                         "every step must be on-policy (one optimizer step per sampled batch)")
     ray.init(runtime_env=ray_runtime_env())
     ray.get(SolverRunner.remote().run.remote(args))
 
