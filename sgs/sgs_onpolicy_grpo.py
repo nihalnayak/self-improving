@@ -5,14 +5,15 @@ REINFORCE Conjecturer, optional --all-targets) except for the Solver phase,
 which follows `sgs.solver_simple` (verl RayPPOTrainer with train batch =
 mini-batch): every optimizer step uses rollouts sampled from the current weights.
 
-    for each chunk of `mini_batch_size` problems of B ∪ B_synth (shuffled):
+    for each full chunk of `mini_batch_size` problems of B ∪ B_synth (shuffled;
+    the last partial chunk is dropped, as verl's drop_last):
         sample k rollouts per problem from the current π_θ
         GRPO advantages + Guide ref log-probs -> exactly one optimizer step
 
 Because the Solver changes across chunks, the synthetic solve rates s(x~) for
 R_solve are measured before the Solver phase with θ_old, as in sgs_grpo (k fresh
 rollouts per synthetic problem, `synth_eval` phase). Target `solved` tracking
-uses the training rollouts.
+uses the training rollouts (dropped problems don't count this iteration).
 
 Usage (4 GPUs; see files/scripts/sgs/sgs_onpolicy_grpo_sorting_qwen3_4b.sbatch):
     python -m sgs.sgs_onpolicy_grpo --dataset files/data/sorting/sorting_1000.jsonl \
@@ -58,10 +59,11 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
     k, M = args.k, args.mini_batch_size
     order = list(range(len(problems)))
     rng.shuffle(order)
-    chunks = [order[s:s + M] for s in range(0, len(order), M)]
+    chunks = [order[s:s + M] for s in range(0, len(order) - M + 1, M)]   # drop_last
     if args.reset_optimizer:
         solver.reset_optimizer()
     rates = np.zeros(len(problems))
+    trained = np.zeros(len(problems), dtype=bool)
     chunk_metrics, lens, clips, examples = [], [], [], []
     n_correct = 0
     for c_idx, chunk in enumerate(chunks):
@@ -72,6 +74,7 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
                                               n=k, step=t)
         v = verify(texts, chunk_problems, k)
         rates[chunk] = v.reshape(len(chunk), k).mean(axis=1)
+        trained[chunk] = True
         n_correct += int(v.sum())
         chunk_metrics.append(solver_grpo_update(t, args, solver, guide, rollouts, v, timing))
         ln, cl = response_stats(rollouts)
@@ -79,17 +82,21 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
         clips.append(cl)
         examples.append({"problem": chunk_problems[0], "completion": texts[0], "correct": bool(v[0])})
     for pos, i in enumerate(ids):
-        solved[i] = solved[i] or bool(rates[pos] > 0)
+        if trained[pos]:
+            solved[i] = solved[i] or bool(rates[pos] > 0)
     keys = {key for cm in chunk_metrics for key in cm}
     m.update({key: float(np.mean([cm[key] for cm in chunk_metrics if key in cm])) for key in keys})
     m["solver/n_opt_steps"] = int(sum(cm["solver/n_opt_steps"] for cm in chunk_metrics))
     m["solver/n_chunks"] = len(chunks)
-    m["solver/n_train_rollouts"] = len(problems) * k
+    m["solver/n_dropped_problems"] = int(len(problems) - trained.sum())
+    m["solver/n_train_rollouts"] = int(trained.sum()) * k
     m["solver/n_train_correct"] = n_correct
     m["solver/response_len_mean"], m["solver/response_clip_frac"] = (
         float(np.mean(lens)) if lens else 0.0, float(np.mean(clips)) if clips else 0.0)
 
-    m["synth/mean_solve_rate_train"] = float(rates[len(ids):].mean()) if synth else 0.0
+    synth_trained = trained[len(ids):]
+    m["synth/mean_solve_rate_train"] = (float(rates[len(ids):][synth_trained].mean())
+                                        if synth_trained.any() else 0.0)
 
     # --- steps 4, 5, 7: Guide, rewards, Conjecturer --------------------------
     m.update(reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, conj,
@@ -97,7 +104,11 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
 
     # --- metrics -------------------------------------------------------------
     m.update({f"timing_s/{key}": val for key, val in timing.items()})
-    m.update(target_metrics(ids, unsolved, rates, solved))
+    # Targets dropped this iteration have no rollouts: report over trained ones only.
+    tids = [i for pos, i in enumerate(ids) if trained[pos]]
+    tset = set(tids)
+    m.update(target_metrics(tids, [i for i in unsolved if i in tset],
+                            rates[:len(ids)][trained[:len(ids)]], solved))
     return m, {"conjectures": conjs, "solver_examples": examples[::max(1, len(examples) // 8)]}
 
 
