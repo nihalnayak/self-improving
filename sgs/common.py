@@ -38,21 +38,21 @@ def solver_messages(xs):
 
 _BOXED_RE = re.compile(r"\\boxed\{(.*?)\}", re.DOTALL)
 _BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")
-_NUM_RE = re.compile(r"-?\d+")
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
-def _ints(s):
+def _nums(s):
     nums = _NUM_RE.findall(s)
-    return [int(n) for n in nums] if nums else None
+    return [float(n) for n in nums] if nums else None
 
 
 def parse_sorted(text):
     """Solver answer: first \\boxed{...}, else last [...] (misc/sort_benchmark.py)."""
     m = _BOXED_RE.search(text)
     if m:
-        return _ints(m.group(1))
+        return _nums(m.group(1))
     brackets = _BRACKET_RE.findall(text)
-    return _ints(brackets[-1]) if brackets else None
+    return _nums(brackets[-1]) if brackets else None
 
 
 # =============================================================================

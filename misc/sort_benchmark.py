@@ -51,7 +51,7 @@ def build_prompt(tok, nums, enable_thinking=False):
 
 _BOXED_RE = re.compile(r"\\boxed\{(.*?)\}", re.DOTALL)
 _BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")
-_NUM_RE = re.compile(r"-?\d+")
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def parse_sorted(text):
@@ -72,7 +72,7 @@ def parse_sorted(text):
     if not nums:
         return None
     try:
-        return [int(n) for n in nums]
+        return [float(n) for n in nums]
     except ValueError:
         return None
 

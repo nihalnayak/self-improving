@@ -53,7 +53,7 @@ import numpy as np
 import ray
 import torch
 
-from sgs.common import (PatchedActorRolloutRefWorker, _BRACKET_RE, _ints, load_targets,
+from sgs.common import (PatchedActorRolloutRefWorker, _BRACKET_RE, _nums, load_targets,
                         parse_sorted, ray_runtime_env, solver_messages, user_msg)
 
 
@@ -226,7 +226,7 @@ def parse_conjecture(text):
     if not blocks:
         return None, None
     brackets = _BRACKET_RE.findall(blocks[-1])
-    xs = _ints(brackets[-1]) if brackets else None
+    xs = _nums(brackets[-1]) if brackets else None
     return (blocks[-1], xs) if xs else (None, None)
 
 
