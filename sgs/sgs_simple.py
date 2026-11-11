@@ -445,12 +445,36 @@ class Policy:
         return out, texts
 
     # ---- training ----------------------------------------------------------
+    def log_probs(self, rollouts):
+        """Per-token log-probs of `rollouts` under this model's current FSDP weights,
+        shaped like `responses` (verl ray_trainer._compute_old_log_prob / _compute_ref_log_prob).
+        Rows are padded to a multiple of n_gpus * micro-batch per GPU (required by
+        verl's micro-batching) and the padding is sliced off after."""
+        from verl import DataProto
+        from verl.protocol import pad_dataproto_to_divisor
+        from verl.utils import tensordict_utils as tu
+        from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+        keep = ["prompts", "responses", "response_mask", "input_ids", "attention_mask", "position_ids"]
+        data = DataProto.from_dict(tensors={k: rollouts.batch[k] for k in keep},
+                                   meta_info={"temperature": 1.0, "multi_turn": False})
+        n = len(data)
+        divisor = (self.cfg.trainer.n_gpus_per_node
+                   * self.cfg.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu)
+        data, _ = pad_dataproto_to_divisor(data, divisor)
+        td = left_right_2_no_padding(data.to_tensordict())
+        tu.assign_non_tensor(td, calculate_entropy=False, compute_loss=False)
+        out = self.wg.compute_log_prob(td)
+        return no_padding_2_padding(tu.get(out, "log_probs"), td).float()[:n]
+
     def update(self, rollouts, rows, advantages, ref_log_probs=None):
-        """One REINFORCE pass over `rollouts[rows]` with per-sequence `advantages`.
+        """One policy-gradient pass over `rollouts[rows]` with per-sequence `advantages`.
 
         Rows are padded up to a multiple of the optimizer mini-batch with
         zero-advantage copies (no gradient). `ref_log_probs` (per-token, aligned
         with `rollouts`) feeds verl's KL loss when `use_kl_loss=true`.
+        For ratio losses (anything but gpg), old log-probs are recomputed with the
+        current FSDP weights before the update, as verl does, not taken from vLLM.
         Returns verl's actor metrics.
         """
         from verl import DataProto
@@ -464,8 +488,12 @@ class Policy:
         tensors = {k: sel.batch[k] for k in keep}
         adv = torch.tensor(advantages, dtype=torch.float32)[:, None]
         tensors["advantages"] = adv * tensors["response_mask"].float()
-        # gpg ignores old_log_probs (no ratio), but verl's ppo_loss requires the key.
-        tensors["old_log_probs"] = sel.batch["rollout_log_probs"].float()
+        if self.cfg.actor_rollout_ref.actor.policy_loss.loss_mode == "gpg":
+            # gpg ignores old_log_probs (no ratio), but verl's ppo_loss requires the key.
+            tensors["old_log_probs"] = sel.batch["rollout_log_probs"].float()
+        else:
+            # PPO ratio anchor θ_old = current weights (verl _compute_old_log_prob).
+            tensors["old_log_probs"] = self.log_probs(sel)
         if ref_log_probs is not None:
             tensors["ref_log_prob"] = ref_log_probs[torch.as_tensor(rows, dtype=torch.long)].float()
         data = DataProto.from_dict(tensors=tensors,

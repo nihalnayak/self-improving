@@ -6,8 +6,8 @@ Solver update changes:
     sgs_simple   Solver <- REINFORCE½: A = v on problems with s <= 0.5, gpg loss
     sgs_grpo     Solver <- GRPO on all of B ∪ B_synth:
                    A_i = (v_i - mean_k v) / (std_k v + 1e-6)     per k-rollout group
-                   PPO clipped ratio vs the vLLM sampling log-probs (θ_old = θ at
-                   sampling time), token-mean, + β·KL(π_θ || ρ) (low_var_kl)
+                   PPO clipped ratio vs θ_old log-probs recomputed by the FSDP actor
+                   before the update (as verl), token-mean, + β·KL(π_θ || ρ) (low_var_kl)
 
 The KL reference is the frozen Guide ρ: it is the same init model as the Solver
 and is never trained, so no fourth model is loaded.
@@ -147,27 +147,6 @@ def grpo_advantages(v, k):
     return ((g - g.mean(axis=1, keepdims=True)) / (std + 1e-6)).reshape(-1)
 
 
-def ref_log_probs(guide, rollouts, divisor):
-    """Per-token log-probs of `rollouts` under the frozen Guide (= init Solver),
-    shaped like `responses` (verl ray_trainer._compute_ref_log_prob).
-    Rows are padded to a multiple of `divisor` (n_gpus * micro-batch per GPU,
-    required by verl's micro-batching) and the padding is sliced off after."""
-    from verl import DataProto
-    from verl.protocol import pad_dataproto_to_divisor
-    from verl.utils import tensordict_utils as tu
-    from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
-
-    keep = ["prompts", "responses", "response_mask", "input_ids", "attention_mask", "position_ids"]
-    data = DataProto.from_dict(tensors={k: rollouts.batch[k] for k in keep},
-                               meta_info={"temperature": 1.0, "multi_turn": False})
-    n = len(data)
-    data, _ = pad_dataproto_to_divisor(data, divisor)
-    td = left_right_2_no_padding(data.to_tensordict())
-    tu.assign_non_tensor(td, calculate_entropy=False, compute_loss=False)
-    out = guide.wg.compute_log_prob(td)
-    return no_padding_2_padding(tu.get(out, "log_probs"), td).float()[:n]
-
-
 def solver_grpo_update(t, args, solver, guide, rollouts, v, timing):
     """GRPO update of the Solver on all `rollouts` (groups of k). Returns metrics."""
     m = {}
@@ -179,7 +158,7 @@ def solver_grpo_update(t, args, solver, guide, rollouts, v, timing):
     ref = None
     if args.kl_coef > 0:
         with phase(t, "solver_ref", timing, f"{len(v)} rollouts (Guide = KL reference)"):
-            ref = ref_log_probs(guide, rollouts, args.n_gpus * args.micro_batch_size_per_gpu)
+            ref = guide.log_probs(rollouts)
     steps = math.ceil(len(v) / solver.mini_batch_size)
     with phase(t, "solver_update", timing, f"{len(v)} rows -> {steps} optimizer steps "
                f"(mini-batch {solver.mini_batch_size})"):
