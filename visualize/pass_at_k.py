@@ -9,12 +9,19 @@ x = k, y = accuracy. Writes `<results_root>/<model_short>/pass_at_k.pdf`
 Explicit two-level loop: outer over baselines (PS, PQ), inner over each
 baseline's configs (one per SOAR run for PS; one per SOAR run × PQ-LR for PQ).
 Stable colors per baseline tag so PS/PQ keep the same hue when new runs land.
+
+Sorting mode (--sort-results-dir): reads `<dir>/<label>/**/<split>_samples.jsonl`
+from `sgs.eval_sort` (n samples per list with per-sample `correct`), computes
+the unbiased pass@k for k = 1..n per list length, and writes
+`<dir>/pass_at_k_<split>.pdf` (and `.png` with --save-png): one panel per list
+length plus "all", one line per label.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from math import comb
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +29,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
@@ -185,11 +193,63 @@ def build_plot(
     print(f"[plot] wrote {output_path}", flush=True)
 
 
+def load_sort_pass_at_k(results_dir: Path) -> pd.DataFrame:
+    """Long table: label, split, length (str, incl. "all"), k, pass (unbiased pass@k)."""
+    rows = []
+    for label_dir in sorted(p for p in results_dir.iterdir() if p.is_dir()):
+        for split in ("train", "val"):
+            files = sorted(label_dir.rglob(f"{split}_samples.jsonl"))
+            if not files:
+                continue
+            df = pd.read_json(files[-1], lines=True)  # last checkpoint if several
+            n = len(df["correct"].iloc[0])
+            df["length"] = df["list"].map(len)
+            for k in range(1, n + 1):
+                df["pk"] = df["correct"].map(lambda oks: 1 - comb(n - sum(oks), k) / comb(n, k))
+                for length, g in [*df.groupby("length"), ("all", df)]:
+                    rows.append({"label": label_dir.name, "split": split,
+                                 "length": str(length), "k": k, "pass": g["pk"].mean()})
+    return pd.DataFrame(rows)
+
+
+def build_sort_plots(df: pd.DataFrame, *, results_dir: Path, save_png: bool) -> None:
+    _apply_plot_theme()
+    labels = sorted(df["label"].unique())
+    style = {lab: (_SET2[i % len(_SET2)], MARKER_CYCLE[i % len(MARKER_CYCLE)])
+             for i, lab in enumerate(labels)}
+    for split, sdf in df.groupby("split"):
+        lengths = sorted({x for x in sdf["length"] if x != "all"}, key=int) + ["all"]
+        fig, axes = plt.subplots(1, len(lengths), figsize=(5.5 * len(lengths), 5.5),
+                                 sharey=True, squeeze=False)
+        for ax, length in zip(axes[0], lengths):
+            for lab, g in sdf[sdf["length"] == length].groupby("label"):
+                color, marker = style[lab]
+                ax.plot(g["k"], g["pass"], color=color, marker=marker,
+                        linewidth=3.0, markersize=10.0)
+            ax.set_title(f"len {length}" if length != "all" else "all")
+            ax.set_xticks(sorted(sdf["k"].unique()))
+            ax.set_xlabel("k")
+        axes[0][0].set_ylabel("pass@k")
+        handles = [Line2D([0], [0], color=c, marker=m, markersize=10, linewidth=3.0, label=lab)
+                   for lab, (c, m) in style.items() if lab in set(sdf["label"])]
+        fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.0),
+                   ncol=min(4, len(handles)), frameon=False, fontsize=LEGEND_FONT_SIZE)
+        fig.suptitle(f"pass@k — {results_dir.name} ({split})", fontsize=TITLE_FONT_SIZE, y=1.04)
+        out = results_dir / f"pass_at_k_{split}.pdf"
+        fig.savefig(out, dpi=300, bbox_inches="tight")
+        if save_png:
+            fig.savefig(out.with_suffix(".png"), dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[plot] wrote {out}", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-root", type=Path,
                         default=Path("files/results/baselines"))
-    parser.add_argument("--model-short", type=str, required=True,
+    parser.add_argument("--sort-results-dir", type=Path, default=None,
+                        help="sorting mode: sgs.eval_sort results dir (one subdir per label)")
+    parser.add_argument("--model-short", type=str, default=None,
                         help="e.g. llama-3.2-3b-instruct")
     parser.add_argument("--out", type=Path, default=None,
                         help="output path; default <results-root>/<model-short>/pass_at_k.pdf")
@@ -199,6 +259,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.sort_results_dir is not None:
+        df = load_sort_pass_at_k(args.sort_results_dir)
+        if df.empty:
+            print(f"[plot] no *_samples.jsonl under {args.sort_results_dir}", flush=True)
+            return
+        build_sort_plots(df, results_dir=args.sort_results_dir, save_png=args.save_png)
+        return
+    if args.model_short is None:
+        raise SystemExit("--model-short is required without --sort-results-dir")
     records = load_records(args.results_root, args.model_short)
     out_path = args.out or (args.results_root / args.model_short / "pass_at_k.pdf")
     build_plot(records, model_short=args.model_short, output_path=out_path,
