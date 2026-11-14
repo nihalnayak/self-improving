@@ -75,7 +75,7 @@ def main():
     for j, config in enumerate(configs):
         ax = axes[0][j]
         sns.lineplot(data=df[df["config"] == config], x="iter", y="solve_rate", hue="source",
-                     hue_order=["synthetic", "original"], marker="o", ax=ax,
+                     hue_order=["synthetic", "original"], marker="o", errorbar=None, ax=ax,
                      palette={"synthetic": "tab:blue", "original": "tab:red"})
         ax.set_xticks(iters)
         ax.set_title("train: all lengths" if config == "all"
