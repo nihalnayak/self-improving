@@ -68,7 +68,7 @@ def main():
     iters = sorted(set(df["iter"]))
     synth = df[df["source"] == "synthetic"]
     norm = LogNorm(vmin=synth["length"].min(), vmax=synth["length"].max())
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap("coolwarm")
 
     sns.set_theme(style="whitegrid", rc={"font.size": FONT_SIZE, "axes.titlesize": FONT_SIZE,
                                          "axes.labelsize": FONT_SIZE})
