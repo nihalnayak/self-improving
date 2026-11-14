@@ -5,6 +5,10 @@ subdir per method, e.g. sgs-mbs32, grpo, base), keeps the last row per
 (label, split) so re-evals overwrite, and writes to <results-dir>:
     sort_eval.pdf / .png   x = list length (+ all), hue = method, one panel per split
     summary.csv            long table: label, checkpoint, split, length, pass
+    sort_eval_val_by_config.pdf / .png
+                           only when labels are `<method>-<train config>` (e.g.
+                           grpo-L8-16-128, base-all): val only, one panel per
+                           train config, hue = method, one shared legend
 
 Usage:
     python -m visualize.sort_eval --results-dir files/results/sgs/eval_sorting_qwen3-1.7b_10ep
@@ -12,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import matplotlib
@@ -23,6 +28,11 @@ import seaborn as sns  # noqa: E402
 
 FONT_SIZE = 16
 LABEL_ORDER = ["base", "grpo", "reinforce", "sgs-mbs32", "sgs-mbs256"]
+# by-config figure: label = <method>-<config>, config = L<len>-<len>... or all
+CONFIG_RE = re.compile(r"^(?P<method>.+)-(?P<config>L\d+(?:-\d+)*|all)$")
+METHOD_NAMES = {"base": "Base", "grpo": "GRPO", "sgs": "SGS",
+                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO"}
+METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO"]
 
 
 def load(results_dir):
@@ -80,6 +90,44 @@ def main():
         fig.savefig(args.results_dir / f"sort_eval.{ext}", dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"[plot] {sorted(set(df['label']))} -> {args.results_dir}/sort_eval.{{pdf,png}}")
+
+    # --- val only, one panel per train config, hue = method ------------------
+    val = df[df["split"] == "val"].copy()
+    parts = val["label"].str.extract(CONFIG_RE)
+    val["method"] = parts["method"].map(lambda m: METHOD_NAMES.get(m, m))
+    val["config"] = parts["config"]
+    val = val.dropna(subset=["config"])
+    if val.empty:
+        return
+    configs = sorted(set(val["config"]), key=lambda c: (c == "all", len(c.split("-")), c))
+    methods = [m for m in METHOD_ORDER if m in set(val["method"])] + \
+              sorted(set(val["method"]) - set(METHOD_ORDER))
+    all_methods = METHOD_ORDER + sorted(set(val["method"]) - set(METHOD_ORDER))
+    palette = dict(zip(all_methods, sns.color_palette("Set2", len(all_methods))))
+
+    fig, axes = plt.subplots(1, len(configs), figsize=(7 * len(configs), 5.5), sharey=True,
+                             squeeze=False)
+    for ax, config in zip(axes[0], configs):
+        sns.barplot(data=val[val["config"] == config], x="length", y="pass", hue="method",
+                    order=lengths, hue_order=methods, palette=palette, ax=ax)
+        ax.set_title("train: all lengths" if config == "all"
+                     else "train: lengths " + ", ".join(config[1:].split("-")))
+        ax.set_xticks(range(len(lengths)), [x.capitalize() for x in lengths])
+        ax.tick_params(axis="x", labelsize=FONT_SIZE)
+        ax.set_xlabel("List Length", fontsize=FONT_SIZE + 2)
+        ax.set_ylabel(f"val {metric}")
+        ax.set_ylim(0, 1)
+        ax.get_legend().remove()
+    handles, names = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, names, loc="upper center", ncol=len(names), frameon=False,
+               bbox_to_anchor=(0.5, 1.06))
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(args.results_dir / f"sort_eval_val_by_config.{ext}", dpi=300,
+                    bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] {methods} x {configs} -> "
+          f"{args.results_dir}/sort_eval_val_by_config.{{pdf,png}}")
 
 
 if __name__ == "__main__":
