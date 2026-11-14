@@ -12,7 +12,7 @@ Defaults produce 1000 samples balanced across node counts
 Usage:
     python misc/gen_preordertraversal_data.py
     python misc/gen_preordertraversal_data.py --seed 1 --out files/data/preordertraversal/preordertraversal_seed1.jsonl
-    python misc/gen_preordertraversal_data.py --n 1000 --lengths 8,16,128
+    python misc/gen_preordertraversal_data.py --n 1000 --lengths 8,16,32,64,128 --out files/data/preordertraversal/preordertraversal_1000_L8-16-32-64-128.jsonl
 """
 
 import argparse

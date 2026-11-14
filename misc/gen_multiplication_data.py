@@ -12,7 +12,7 @@ count, with no leading zeros. Products are stored as JSON integers.
 Usage:
     python misc/gen_multiplication_data.py
     python misc/gen_multiplication_data.py --seed 1 --out files/data/multiplication/multiplication_seed1.jsonl
-    python misc/gen_multiplication_data.py --n 1000 --lengths 8,16,128
+    python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,6,8,10 --out files/data/multiplication/multiplication_1000_L2-4-6-8-10.jsonl
 """
 
 import argparse

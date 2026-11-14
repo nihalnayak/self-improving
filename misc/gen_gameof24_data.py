@@ -14,7 +14,7 @@ The CSV is downloaded at runtime unless --source supplies a local copy.
 Usage:
     python misc/gen_gameof24_data.py
     python misc/gen_gameof24_data.py --seed 1 --out files/data/gameof24/gameof24_seed1.jsonl
-    python misc/gen_gameof24_data.py --n 100 --min-amt 10 --max-amt 30
+    python misc/gen_gameof24_data.py --n 100 --min-amt 5 --max-amt 30 --out files/data/gameof24/gameof24_100_minamt5-maxamt30.jsonl
 """
 
 import argparse
