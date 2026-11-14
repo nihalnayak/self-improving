@@ -22,17 +22,25 @@ from pathlib import Path
 
 
 def gen_sample(length: int, rng: random.Random) -> dict:
+    # Create a random shuffle of node labels 0, 1, ..., length-1
     labels = list(range(length))
     rng.shuffle(labels)
 
     def traverse(values):
+        # Empty tree = no traversal entries
         if not values:
             return [], [], []
+
+        # Set the root to be the first entry in the node list
         root = values[0]
+
+        # Split the remaining entries into the left and right subtrees; subtrees are also constructed recursively
         split = rng.randrange(len(values))
-        li, lp, lr = traverse(values[1:split + 1])
-        ri, rp, rr = traverse(values[split + 1:])
-        return li + [root] + ri, lp + rp + [root], [root] + lr + rr
+        l_in, l_post, l_pre = traverse(values[1:split + 1])
+        r_in, r_post, r_pre = traverse(values[split + 1:])
+
+        # Use the traversal rules to combine the traversals from root + subtree
+        return l_in + [root] + r_in, l_post + r_post + [root], [root] + l_pre + r_pre
 
     inorder, postorder, preorder = traverse(labels)
     return {"inorder": inorder, "postorder": postorder, "preorder": preorder}

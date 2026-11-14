@@ -14,7 +14,7 @@ The CSV is downloaded at runtime unless --source supplies a local copy.
 Usage:
     python misc/gen_gameof24_data.py
     python misc/gen_gameof24_data.py --seed 1 --out files/data/gameof24/gameof24_seed1.jsonl
-    python misc/gen_gameof24_data.py --n 100 --min-amt 10
+    python misc/gen_gameof24_data.py --n 100 --min-amt 10 --max-amt 30
 """
 
 import argparse
@@ -29,16 +29,22 @@ from urllib.request import urlopen
 
 SOURCE_URL = "https://raw.githubusercontent.com/princeton-nlp/tree-of-thought-llm/master/src/tot/data/24/24.csv"
 
-
+# NOTE: maybe make a function that allows us to get all the possible solutions to a 24 game problem, not just one solution
 def solve(numbers: list) -> str | None:
     def search(items):
+
+        # Check to see if the final combined term is 24
         if len(items) == 1:
             return items[0][1] if items[0][0] == 24 else None
+
+        # Go through every unordered pair of available numbers
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
                 a, ae = items[i]
                 b, be = items[j]
-                rest = [item for k, item in enumerate(items) if k not in (i, j)]
+                rest = [item for k, item in enumerate(items) if k not in (i, j)] # the rest of the available numbers not in the pair
+
+                # Go through every possible binary operation on the number pair
                 candidates = [(a + b, f"({ae} + {be})"),
                               (a - b, f"({ae} - {be})"),
                               (b - a, f"({be} - {ae})"),
@@ -47,6 +53,8 @@ def solve(numbers: list) -> str | None:
                     candidates.append((a / b, f"({ae} / {be})"))
                 if a:
                     candidates.append((b / a, f"({be} / {ae})"))
+
+                # Add the result of the binary operation to the list of available numbers and continue search for answer
                 for value, expression in candidates:
                     answer = search(rest + [(value, expression)])
                     if answer is not None:
