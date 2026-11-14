@@ -54,6 +54,8 @@ def load(results_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--results-dir", type=Path, required=True)
+    ap.add_argument("--model", default="Qwen/Qwen3-4B",
+                    help="base model behind pass5_samples.jsonl (axis label only)")
     args = ap.parse_args()
 
     df = load(args.results_dir)
@@ -75,13 +77,13 @@ def main():
     for j, config in enumerate(configs):
         ax = axes[0][j]
         sns.lineplot(data=df[df["config"] == config], x="iter", y="solve_rate", hue="source",
-                     hue_order=["synthetic", "original"], marker="o", errorbar=None, ax=ax,
+                     hue_order=["synthetic", "original"], marker="o", markersize=10, linewidth=2.5, errorbar=None, ax=ax,
                      palette={"synthetic": "tab:blue", "original": "tab:red"})
         ax.set_xticks(iters)
         ax.set_title("train: all lengths" if config == "all"
                      else "train: lengths " + ", ".join(config[1:].split("-")))
         ax.set_xlabel("")
-        ax.set_ylabel("Base Solve Rate" if j == 0 else "")
+        ax.set_ylabel(f"Base Solve Rate ({args.model.split('/')[-1]})" if j == 0 else "")
         ax.set_ylim(0, 1)
         ax.tick_params(labelsize=FONT_SIZE - 2)
         ax.get_legend().remove()
