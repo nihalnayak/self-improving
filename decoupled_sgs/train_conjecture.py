@@ -11,7 +11,8 @@ trains the Conjecturer with GRPO (PPO clip, token-mean, low_var_kl to the frozen
 Solver, which shares the init weights).
 
 Pipeline (one Ray runner, 2 models on the shared GPUs):
-    1. hard tasks   pass@5 of the frozen Solver on --dataset (no hint); keep 0/5
+    1. hard tasks   pass@--n-hard (default 5) of the frozen Solver on --dataset
+                    (no hint); keep 0/n
     2. split        seeded shuffle, 50/50 -> train (Conjecturer) / heldout
                     (validation, and the later Solver-training set)
     3. targets      within each split, order easiest -> hardest and cut into 4
@@ -30,7 +31,7 @@ ties broken by the seeded shuffle. Revisit if a better signal is available
 (e.g. pass@k at larger k, or hinted solve rate).
 
 Outputs in --out-dir:
-    hard_eval.jsonl             per-task pass@5 of the base Solver (no hint)
+    hard_eval.jsonl             per-task pass@--n-hard of the base Solver (no hint)
     splits/{train,heldout}.jsonl  {list, sorted, length, target}
     metrics.jsonl, eval.jsonl, samples/iter_XXXX.json, eval_samples/iter_XXXX.jsonl
     final_dataset.jsonl         {list, sorted, length, target, hint, actual_rate, abs_err}
@@ -75,8 +76,9 @@ def parse_args(argv=None):
     ap.add_argument("--iters", type=int, default=100, help="GRPO optimizer steps")
     ap.add_argument("--batch-size", type=int, default=16, help="train tasks per step")
     ap.add_argument("--group-size", type=int, default=8, help="hints per task (GRPO group)")
-    ap.add_argument("--n-solve", type=int, default=5,
-                    help="Solver attempts per hint (also the hard-task pass@n)")
+    ap.add_argument("--n-solve", type=int, default=25, help="Solver attempts per hint")
+    ap.add_argument("--n-hard", type=int, default=5,
+                    help="base-Solver attempts per task for the hard filter (keep 0/n)")
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--micro-batch-size-per-gpu", type=int, default=4)
     ap.add_argument("--kl-coef", type=float, default=0.001,
@@ -195,7 +197,7 @@ def assign_targets(tasks):
 def find_hard(args, solver, out_dir):
     """Base-Solver pass@n (no hint) on --dataset; returns the 0/n tasks."""
     tasks = load_targets(args.dataset)
-    n = args.n_solve
+    n = args.n_hard
     timing = {}
     with phase(0, "hard_eval", timing, f"{len(tasks)} tasks x {n} attempts"):
         _, texts = solver.generate([user_msg(SOLVER_PROMPT.format(list_str=str(xs)))
