@@ -1,0 +1,122 @@
+\section{Introduction}
+% Official template prompt: Significance of the research and prior work.
+
+Agentic AI systems can help users interact with websites and learn about products.
+When a user asks a question, an agentic AI system typically uses a large language model (LLM) to interpret the request, identify the information needed, and select appropriate tools to retrieve it. 
+The system executes these tool calls and returns the results to the LLM, which can use them to formulate an answer. 
+Although tools provide vital information and functionality, the LLM plays a central role in interpreting the user’s request, selecting actions, and synthesizing the results into a final answer.
+Building an LLM that can accurately reason and orchestrate tool calls requires training a pretrained LLM across several stages of post-training on well-curated datasets. 
+In other words, the performance of the LLM is directly shaped by the quality of the post-training dataset. 
+
+Creating training datasets for different stages of post-training involves elaborate data curation pipelines. 
+This includes the collection of expert demonstrations~\citep{li2025apple}, generation of synthetic data~\citep{bonito:aclfindings24}, cleaning and filtering examples to remove errors and duplicates, and careful balancing of domains, skills, and task difficulties~\citep{guha2026openthoughts}.
+These steps require substantial effort to ensure that the resulting data is accurate, relevant, and useful for training. 
+As agentic systems are expected to solve increasingly challenging problems, reliable demonstrations can become prohibitively expensive to collect or unavailable.
+This creates a need for scalable methods that generate useful supervision for capabilities that cannot be readily taught through existing datasets.
+How can we automatically generate training data that enables agents to solve challenging target tasks when expert demonstrations are unavailable?
+% These models often undergo supervised fine-tuning (SFT), followed by reinforcement learning from human feedback (RLHF) or verifiable rewards (RLVR).
+% A key challenge is to develop training datasets that help models acquire the capabilities needed to solve increasingly challenging tasks.
+% SFT provides dense supervision through reference responses, but its effectiveness depends on the availability and quality of demonstrations~\cite{ouyang2022training}.
+% RLVR can support learning without complete demonstrations, but it faces a different limitation: when a model rarely generates a correct solution, sparse outcome rewards provide little signal for improvement~\cite{sundaram2026teaching}.
+% Addressing this limitation requires careful data curation across difficulty levels, domains, and skills, providing learnable intermediate tasks that support progress toward harder problems.
+% However, designing these curricula requires elaborate pipelines that must continually adapt to the model's changing capabilities.
+% How can we automatically generate useful curricula that bridge the gap between an agent's existing capabilities and the challenging tasks users want it to solve?
+
+
+% \nihal{make a bigger deal about hand crafted datasets; cite soar and often genenerate inaccurate data but focus on changing the format of the datasets?}
+Self-play offers a promising strategy for automatically synthesizing training datasets and designing training curricula by allowing models to generate and learn from their own data~\citep{silver2017mastering,sukhbaatar2018intrinsic}.
+Recent work on LLMs uses asymmetric self-play to create synthetic datasets with a natural difficulty curriculum to improve downstream performance on target tasks~\citep{zhao2025absolute,huang2026rzero,liu2026spade}.
+During self-play training, a generator LLM or agent generates tasks matched to the solver agent's capabilities, the solver attempts to solve these tasks, and the generator adjusts the difficulty of the synthetic data based on feedback from the solver.
+However, these algorithms often generate difficult tasks that do not improve downstream task performance~\citep{bailey2026scaling}.
+Furthermore, self-play algorithms have been known to collapse after a few training iterations, limiting their practical utility for curating datasets.
+Finally, it remains unclear whether self-play stalls because the synthetic data concentrates on a narrow range of skills or ceases to support the target capabilities. 
+% Finally, prior work focuses more on the algorithms than on the synthetic data they generate, potentially overlooking large gaps in the data distributions that could hurt generalization.
+Distinguishing these failure modes requires tracking how the generated curriculum evolves alongside the solver’s capabilities and testing whether targeted changes to the data restore learning. 
+
+% However, it remains unclear whether self-play stalls because generated tasks become too difficult, concentrate on a narrow range of skills, or cease to support the target capabilities. Distinguishing these failure modes requires tracking how the generated curriculum evolves alongside the solver’s capabilities and testing whether targeted changes to the data restore learning. Controlled algorithmic environments provide a tractable setting for isolating these effects because task correctness and properties can be measured programmatically.
+
+In this project, we aim to provide a deeper understanding of synthetic data dynamics during self-play under both target-independent and target-guided rewards.
+We will develop controlled, verifiable environments in which an LLM proposes algorithmic tasks whose validity and solutions can be checked programmatically.
+These environments will allow us to track the correctness, difficulty, diversity, and skill coverage of generated data throughout training.
+We will also use gradient similarity to study how the generated data aligns with target tasks.
+Together, these analyses will help us identify gaps in the generated curricula and investigate how they contribute to learning plateaus, model collapse, and poor generalization.
+Building on these findings, we will develop data-centric interventions that address these limitations and guide generation toward target capabilities.
+The goal is to establish practical principles for customizing language agents through self-play with less reliance on handcrafted training datasets.
+
+
+
+% AlphaGo Zero demonstrated that self-play can achieve superhuman performance in Go without human demonstrations, given the game's rules and outcomes~\cite{silver2017mastering}.
+% Asymmetric self-play develops automatic curricula through interactions between an agent that proposes tasks and another agent that attempts to solve them~\cite{sukhbaatar2018intrinsic}.
+% Recent work extends these ideas to language models: Absolute Zero and R-Zero generate training tasks through interactions between task-proposing and task-solving roles, without relying on human-curated task datasets during self-play~\cite{zhao2025absolute,huang2026rzero}.
+% Self-Guided Self-Play uses a guide to assess whether generated problems are relevant to unsolved target problems and are clean and natural~\cite{bailey2026scaling}.
+% SOAR rewards a teacher for generating problems that improve a student's performance on challenging target problems, enabling learning through useful intermediate tasks~\cite{sundaram2026teaching}.
+% CompassPlay instead uses gradient alignment with reference tasks to estimate the training value of generated problems without additional solver training~\cite{pu2026compassplay}.
+% Related work on Dataset Policy Gradient optimizes synthetic data generators to shape downstream model properties according to specified differentiable objectives~\cite{thrush2026synthetic}.
+% These approaches provide promising mechanisms for automated data curation and motivate a systematic study of how the resulting curricula evolve, which properties support learning, and when they enable progress on challenging target tasks.
+
+\section{Methods}
+% Your technical approach.
+% \nihal{high-level: there are two different methods that people are using here: grounded and non-grounded rewards. }
+The goal is to first systematically study the limitations of existing self-play frameworks, such as model collapse and data diversity collapse, by designing new verifiable self-play environments and then address these limitations through algorithmic interventions. 
+
+\paragraph{Self-Play Framework.}
+We will extend existing self-play frameworks to study synthetic data dynamics.
+These frameworks use two LLM roles: a proposer and a solver, following the asymmetric self-play paradigm~\citep{sukhbaatar2018intrinsic,zhao2025absolute,sundaram2026teaching}.
+The proposer generates synthetic tasks intended to support the solver's learning, and the solver attempts to solve them.
+Both roles are trained through reinforcement learning: the solver receives rewards based on the correctness of its solutions, while the proposer receives feedback derived from the solver's performance.
+Through repeated interactions, the proposer adapts its task generation as the solver's capabilities change, producing an evolving training curriculum.
+
+The rewards used to train the proposer differ across self-play frameworks.
+Broadly, we distinguish between target-independent and target-guided rewards.
+Target-independent rewards use the solver's performance or answer consistency on generated tasks without reference data from the target tasks~\citep{zhao2025absolute,huang2026rzero}.
+Target-guided rewards use reference data from the target-task distribution to measure or estimate whether generated data will improve the solver's performance on those tasks~\citep{pu2026compassplay,sundaram2026teaching}.
+Both approaches aim to automatically generate useful synthetic training data that adapts to the solver's changing capabilities.
+In this project, we will study how synthetic data evolves during self-play under both types of reward and how target-task guidance affects the resulting data and downstream performance.
+
+
+\paragraph{Verifiable Environments.}
+% We propose to introduce a new verifiable environment to systematically study synthetic data dynamics during self-play. 
+Existing self-play work often focuses on mathematical reasoning and coding tasks~\citep{zhao2025absolute,huang2026rzero,sundaram2026teaching,bailey2026scaling}. 
+However, the reliability of supervision for intermediate synthetic tasks varies across frameworks. 
+For example, an LLM may generate a coding problem, a solution, and unit tests, but passing those tests does not guarantee correctness because the tests may be incomplete or incorrect~\citep{wilf2026propose}. 
+Such unreliable verification can allow incorrect solutions to enter the self-play loop and degrade downstream performance. 
+Furthermore, checking solution correctness alone does not establish whether generated tasks are appropriately difficult, diverse, or useful for learning target capabilities~\citep{pu2026compassplay}. 
+We therefore propose a controlled, verifiable environment to systematically study self-play algorithms and the intermediate synthetic data they generate. 
+By enabling programmatic measurement of task validity, solution correctness, and explicit task properties, this environment will help us distinguish failures arising from incorrect supervision from those associated with task difficulty, limited diversity, or poor alignment with target tasks.
+
+In this work, we propose a controllable, verifiable environment to systematically study self-play algorithms and the intermediate synthetic data they generate.
+Our approach builds on RLVE~\citep{zeng2025rlve}, which uses programmable problem generators to produce verifiable tasks for training language models.
+An LLM is then trained through reinforcement learning to solve these tasks.
+The environment checks its answers against verified ground-truth solutions and provides rewards.
+As the LLM's accuracy improves during training, the programmable problem generator increases the difficulty of the synthetic tasks.
+
+Here, we will use the proposer LLM as the problem generator to produce verifiable tasks.
+We will focus on algorithmic tasks, such as sorting, multiplication, and tree traversal.
+Task specifications will be extracted from the generated text using regular expressions, programs, or an LLM, and their validity and solutions will be checked using deterministic functions.
+This setup will allow us to control the types of tasks generated during training and measure their correctness, diversity, and difficulty.
+
+\paragraph{Evaluation Tools.}
+To systematically evaluate the synthetic tasks generated during self-play, we will examine their alignment with target tasks, difficulty, and diversity.
+
+First, we will study how gradient similarity between synthetic and target tasks changes during training.
+Recent work in self-play~\citep{pu2026compassplay} adds an explicit gradient similarity reward when training the proposer. 
+However, our prior work~\citep{nayak:icml26} found that while gradient similarity correlates strongly with downstream loss over the tokens, it might not always exhibit a strong correlation with downstream metrics such as accuracy and pass rates.
+Building on this insight, we will quantify when the proposer generates tasks that are poorly aligned with the target tasks and establish the relationship between gradient similarity to target tasks and downstream performance. 
+We will then test whether changes in gradient similarity provide early indications of learning plateaus, distinguishing plateaus in target-task loss from those in accuracy and pass rates.
+When reduced alignment precedes stalled learning, we will test whether filtering poorly aligned tasks or increasing the sampling of aligned tasks restores progress. 
+These interventions will help distinguish predictive associations from evidence that task alignment contributes to learning outcomes.
+
+Next, our verifiable environment will allow us to extract task properties programmatically and use them to characterize task complexity.
+Existing work often quantifies task difficulty using dataset metadata~\citep{hase2024unreasonable}, the number of tokens in the output~\citep{lee2025self}, and leaderboard statistics~\citep{kordi:eacl26}.
+In contrast to these approaches, our work relies on explicit properties of task inputs that we can measure and control programmatically.
+For example, in sorting tasks, we can characterize task complexity by the number of elements to be sorted.
+Similarly, we can characterize multiplication tasks by the number of digits in their operands.
+These explicit properties will provide interpretable measures of task complexity, which we will relate to solver success rates to assess empirical difficulty.
+
+Finally, we will measure diversity through the coverage and distribution of task types and their properties.
+For example, a dataset containing sorting problems with five, ten, and fifteen numbers covers a broader range of input sizes than one containing only lists of five numbers.
+Tracking these distributions will help us identify gaps or concentration in the generated data.
+Furthermore, this approach will provide interpretable measurements of diversity along explicit task properties without relying solely on representation-based metrics~\citep{friedman2022vendi} or linguistic heuristics~\citep{pu2026compassplay}.
+Finally, understanding the data distributions will enable us to propose algorithmic interventions to mitigate any data gaps. 
+
+
