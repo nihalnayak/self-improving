@@ -1,0 +1,68 @@
+\section{SGS-GRPO with Majority-Vote Rewards}
+\label{app:sgs-grpo-mv}
+
+\Cref{alg:sgs-grpo-mv} modifies the on-policy SGS-GRPO
+(\cref{alg:sgs-grpo-onpolicy}) so that synthetic problems need no ground truth.
+Target problems $x \in \B$ keep the verifier $v$. For a synthetic problem
+$\xt \in \Bsynth$ with rollouts $y_1,\dots,y_k$, let $a(y_i)$ be the parsed
+answer of $y_i$ ($a(y_i) = \bot$ if it cannot be parsed; such rollouts do not
+vote). Let
+\begin{equation}
+  \hat{a}(\xt) = \argmax_{a \neq \bot} \sum_{i=1}^{k} \mathbf{1}[a(y_i) = a],
+  \qquad
+  c(\xt) = \frac{1}{k} \sum_{i=1}^{k} \mathbf{1}[a(y_i) = \hat{a}(\xt)]
+  \label{eq:mv-mode}
+\end{equation}
+be the majority answer and its agreement. With agreement threshold
+$\tau \in (0, 1]$, the majority-vote reward is
+\begin{equation}
+  \tilde{v}(y_i) = \mathbf{1}\big[c(\xt) \geq \tau\big] \cdot \mathbf{1}\big[a(y_i) = \hat{a}(\xt)\big],
+  \label{eq:mv-reward}
+\end{equation}
+so the majority answer serves as a pseudo-label when enough rollouts agree,
+and otherwise every rollout gets reward $0$ (zero GRPO advantage). If no
+rollout can be parsed, $\tilde{v}(y_i) = 0$ for all $i$.
+$\tilde{v}$ replaces $v$ on synthetic problems in both places SGS uses it:
+the Solver's GRPO advantages (\cref{eq:grpo-adv}) and the solve rate
+$s(\xt) = \frac{1}{k}\sum_{i=1}^{k} \tilde{v}(y_i)$ in the Conjecturer's
+$\Rsolve$. At $\tau = 1$, every rewarded group is unanimous, so
+$s(\xt) \in \{0, 1\}$, $\Rsolve = 0$ always, and the Conjecturer receives no
+learning signal.
+
+\begin{algorithm}[tb]
+  \caption{SGS-GRPO with majority-vote rewards (on-policy Solver update)}
+  \label{alg:sgs-grpo-mv}
+  \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} Dataset $\D$, Solver $\solver$, Conjecturer $\conj$, Guide $\guide$, mini-batch size $M$, agreement threshold $\tau$
+    \STATE Initialize all problems in $\D$ as unsolved
+    \FOR{iteration $t = 1, 2, \ldots$}
+      \STATE Sample batch $\B \subseteq \D$
+      \STATE Split $\B$ into $\Bsolved$, $\Bunsolved$
+      \STATE $\mathcal{C} \leftarrow \B$ if all targets, else $\Bunsolved$
+      \FOR{each $x \in \mathcal{C}$}
+        \STATE Generate $\xt \sim \conj(\cdot \mid x)$
+      \ENDFOR
+      \STATE Collect synthetic set $\Bsynth$
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE Sample $k$ solutions from $\solver$ (before the Solver update)
+        \STATE Score them with $\tilde{v}$ (\cref{eq:mv-mode,eq:mv-reward})
+        \STATE $s(\xt) \leftarrow \frac{1}{k}\sum_{i=1}^{k} \tilde{v}(y_i)$
+        \STATE $\text{ind} \leftarrow \mathbf{1}[\, s(\xt) \neq 0 \land s(\xt) \text{ in bottom } 70\% \,]$
+        \STATE $\Rsolve \leftarrow \text{ind} \cdot (1 - s(\xt))$
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
+      \STATE Reset optimizer states of $\solver$, $\conj$ (if optimizer reset)
+      \FOR{each mini-batch $\B_m$ of $M$ problems of shuffled $\B \cup \Bsynth$}
+        \STATE $\theta_{\mathrm{old}} \leftarrow \theta$
+        \FOR{each problem $x \in \B_m$}
+          \STATE Sample $k$ solutions from $\solverold$
+          \STATE Score them with $v$ if $x \in \B$, else with $\tilde{v}$ (\cref{eq:mv-reward})
+          \STATE Compute $\Ahat_i$ (\cref{eq:grpo-adv})
+        \ENDFOR
+        \STATE Update Solver $\solver$ with one gradient step on $\Lgrpo(\theta; \B_m)$ (\cref{eq:grpo})
+      \ENDFOR
+      \STATE Mark each $x \in \B$ with $s(x) > 0$ as solved
+      \STATE Update Conjecturer $\conj$ with RL using $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}

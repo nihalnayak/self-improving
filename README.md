@@ -8,6 +8,7 @@ ICML 2026 paper, built from the official style kit
 | `main.tex` | paper entry point (blind submission: `\usepackage{icml2026}`) |
 | `macros.tex` | notation from SGS (arXiv:2604.20209): `\solver`, `\conj`, `\guide`, `\B`, `\Bsynth`, ... |
 | `sections/algorithms.tex` | SGS, SGS-GRPO (off-policy), SGS-GRPO (on-policy), GRPO loss |
+| `sections/appendix.tex` | appendix: SGS-GRPO with majority-vote rewards |
 | `references.bib` | bibliography |
 | `icml2026.sty`, `icml2026.bst`, `algorithm.sty`, `algorithmic.sty`, `fancyhdr.sty` | ICML kit |
 | `example_paper.*` | ICML's example paper, kept for reference |
