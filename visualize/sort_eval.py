@@ -27,20 +27,24 @@ import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 
 FONT_SIZE = 16
+# OPSD's teacher sees the gold sorted list: not a fair comparison, so not plotted.
+EXCLUDE_PREFIXES = ("opsd-",)
 LABEL_ORDER = ["base", "grpo", "reinforce", "sgs-mbs32", "sgs-mbs256"]
 # by-config figure: label = <method>-<config>, config = L<len>-<len>... or all
 CONFIG_RE = re.compile(r"^(?P<method>.+)-(?P<config>L\d+(?:-\d+)*|all)$")
 METHOD_NAMES = {"base": "Base", "grpo": "GRPO", "grpo-sgs-synth": "GRPO (SGS Synth.)", "sgs": "SGS",
-                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO", "opsd": "OPSD",
+                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO",
                 **{f"sgs-onpolicy-grpo-mv{r}-reset": f"SGS-OnPolicy-GRPO (MV≥{r})"
                    for r in ("0.25", "0.5", "0.75", "1.0")}}
 METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO",
-                *[f"SGS-OnPolicy-GRPO (MV≥{r})" for r in ("0.25", "0.5", "0.75", "1.0")], "OPSD"]
+                *[f"SGS-OnPolicy-GRPO (MV≥{r})" for r in ("0.25", "0.5", "0.75", "1.0")]]
 
 
 def load(results_dir):
     rows = []
     for summary in sorted(results_dir.glob("*/summary.jsonl")):
+        if summary.parent.name.startswith(EXCLUDE_PREFIXES):
+            continue
         last = {}
         for line in summary.read_text().splitlines():
             r = json.loads(line)
