@@ -1,0 +1,9 @@
+\begin{abstract}
+Effective post-training of large language model (LLM) agents requires well-curated, high-quality datasets that provide a broader range of coverage in terms of skills and difficulties, but creating them requires enormous human effort. 
+While self-play offers a promising strategy to automatically create synthetic data by allowing models to generate and learn from their own data, models often generate difficult synthetic data that offer little or no signal to improve downstream performance and collapse after only a few training iterations. 
+We propose to systematically study the synthetic data dynamics during self-play in LLMs.
+First, we will design controlled, verifiable environments in which an LLM proposes algorithmic tasks whose validity and solutions can be checked programmatically.
+Then, we will study when existing self-play algorithms fail by tracking the correctness, difficulty, diversity, and skill coverage of generated data, and examining how gaps in the generated curricula and poor alignment with target tasks contribute to learning plateaus, model collapse, and poor generalization.
+Finally, we will introduce algorithmic interventions that address these gaps, mitigate model and diversity collapse, and guide generation toward target capabilities.
+The goal is to establish practical principles for customizing language agents through self-play with less reliance on handcrafted training datasets.
+\end{abstract}
