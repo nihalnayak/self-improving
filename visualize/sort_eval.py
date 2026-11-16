@@ -31,8 +31,8 @@ LABEL_ORDER = ["base", "grpo", "reinforce", "sgs-mbs32", "sgs-mbs256"]
 # by-config figure: label = <method>-<config>, config = L<len>-<len>... or all
 CONFIG_RE = re.compile(r"^(?P<method>.+)-(?P<config>L\d+(?:-\d+)*|all)$")
 METHOD_NAMES = {"base": "Base", "grpo": "GRPO", "grpo-sgs-synth": "GRPO (SGS Synth.)", "sgs": "SGS",
-                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO"}
-METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO"]
+                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO", "opsd": "OPSD"}
+METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO", "OPSD"]
 
 
 def load(results_dir):
