@@ -31,8 +31,11 @@ LABEL_ORDER = ["base", "grpo", "reinforce", "sgs-mbs32", "sgs-mbs256"]
 # by-config figure: label = <method>-<config>, config = L<len>-<len>... or all
 CONFIG_RE = re.compile(r"^(?P<method>.+)-(?P<config>L\d+(?:-\d+)*|all)$")
 METHOD_NAMES = {"base": "Base", "grpo": "GRPO", "grpo-sgs-synth": "GRPO (SGS Synth.)", "sgs": "SGS",
-                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO", "opsd": "OPSD"}
-METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO", "OPSD"]
+                "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO", "opsd": "OPSD",
+                **{f"sgs-onpolicy-grpo-mv{r}-reset": f"SGS-OnPolicy-GRPO (MV≥{r})"
+                   for r in ("0.25", "0.5", "0.75", "1.0")}}
+METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO",
+                *[f"SGS-OnPolicy-GRPO (MV≥{r})" for r in ("0.25", "0.5", "0.75", "1.0")], "OPSD"]
 
 
 def load(results_dir):
@@ -103,7 +106,7 @@ def main():
     methods = [m for m in METHOD_ORDER if m in set(val["method"])] + \
               sorted(set(val["method"]) - set(METHOD_ORDER))
     all_methods = METHOD_ORDER + sorted(set(val["method"]) - set(METHOD_ORDER))
-    palette = dict(zip(all_methods, sns.color_palette("Set2", len(all_methods))))
+    palette = dict(zip(all_methods, sns.color_palette("tab10", len(all_methods))))
 
     fig, axes = plt.subplots(1, len(configs), figsize=(7 * len(configs), 5.5), sharey=True,
                              squeeze=False)
@@ -119,8 +122,8 @@ def main():
         ax.set_ylim(0, 1)
         ax.get_legend().remove()
     handles, names = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, names, loc="upper center", ncol=len(names), frameon=False,
-               bbox_to_anchor=(0.5, 1.06))
+    fig.legend(handles, names, loc="lower center", ncol=min(len(names), 5), frameon=False,
+               bbox_to_anchor=(0.5, 1.0))
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(args.results_dir / f"sort_eval_val_by_config.{ext}", dpi=300,
