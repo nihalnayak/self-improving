@@ -80,6 +80,10 @@ def parse_args(argv=None):
     ap.add_argument("--clip-ratio", type=float, default=0.2, help="PPO clip epsilon")
     ap.add_argument("--too-easy-frac", type=float, default=0.3,
                     help="top fraction of synth solve rates that gets R_solve=0")
+    ap.add_argument("--r-solve", choices=["percentile", "learnability", "rzero"],
+                    default="percentile",
+                    help="R_solve rule: percentile = Alg. 1 (0 if s=0 or top too-easy-frac, "
+                         "else 1-s); learnability = s(1-s); rzero = 1-2|s-0.5| (R-Zero)")
     ap.add_argument("--lo", type=int, default=0, help="integer range shown to Conjecturer")
     ap.add_argument("--hi", type=int, default=10000)
     ap.add_argument("--thinking", action="store_true",
@@ -207,6 +211,10 @@ def reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, co
 
     # --- step 5: R_synth = minmax(R_solve * R_guide) -------------------------
     r_solve = solve_rate_rewards(synth_rates, args.too_easy_frac, rng) if synth else np.zeros(0)
+    if synth and args.r_solve == "learnability":
+        r_solve = synth_rates * (1 - synth_rates)
+    elif synth and args.r_solve == "rzero":
+        r_solve = 1 - 2 * np.abs(synth_rates - 0.5)
     for c, rs in zip(synth, r_solve):
         c["r_solve"] = float(rs)
         c["r_synth_raw"] = rs * c["r_guide"]
