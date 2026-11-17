@@ -73,18 +73,20 @@ def main():
     sns.set_theme(style="whitegrid")
     datasets = list(dict.fromkeys(d for d, _ in RUNS))
     methods = list(dict.fromkeys(m for _, m in RUNS))
-    fig, axes = plt.subplots(1, len(datasets), figsize=(10, 4), sharey=True)
+    fig, axes = plt.subplots(1, len(datasets), figsize=(14, 5), sharey=True)
     for ax, dataset in zip(axes, datasets):
         sns.lineplot(data=df[df["dataset"] == dataset], x="iter", y="pass5", hue="method",
                      hue_order=methods, errorbar=None, marker="o", ax=ax)
         ax.set_title(dataset)
         ax.set_xlabel("Iteration")
         ax.set_xticks(sorted(df["iter"].unique()))
-        ax.legend(title=None)
+        ax.get_legend().remove()
     axes[0].set_ylabel(f"Base pass@5 ({args.model.split('/')[-1]})")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="center left", bbox_to_anchor=(1, 0.5), frameon=False)
     fig.tight_layout()
     for ext in ("pdf", "png"):
-        fig.savefig(args.out_dir / f"pass5_mv.{ext}")
+        fig.savefig(args.out_dir / f"pass5_mv.{ext}", bbox_inches="tight")
     print(f"[plot] wrote {args.out_dir}")
 
 
