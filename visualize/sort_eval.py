@@ -32,12 +32,17 @@ EXCLUDE_PREFIXES = ("opsd-",)
 LABEL_ORDER = ["base", "grpo", "reinforce", "sgs-mbs32", "sgs-mbs256"]
 # by-config figure: label = <method>-<config>, config = L<len>-<len>... or all
 CONFIG_RE = re.compile(r"^(?P<method>.+)-(?P<config>L\d+(?:-\d+)*|all)$")
+RSOLVE_NAMES = {"learnability": "s(1−s)", "rzero": "R-Zero"}
 METHOD_NAMES = {"base": "Base", "grpo": "GRPO", "grpo-sgs-synth": "GRPO (SGS Synth.)", "sgs": "SGS",
                 "sgs-onpolicy-grpo-reset": "SGS-OnPolicy-GRPO",
                 **{f"sgs-onpolicy-grpo-mv{r}-reset": f"SGS-OnPolicy-GRPO (MV≥{r})"
-                   for r in ("0.25", "0.5", "0.75", "1.0")}}
+                   for r in ("0.25", "0.5", "0.75", "1.0")},
+                **{f"sgs-onpolicy-grpo-mv{r}-{rs}-reset": f"SGS-OnPolicy-GRPO (MV≥{r}, {name})"
+                   for r in ("0.5", "0.75") for rs, name in RSOLVE_NAMES.items()}}
 METHOD_ORDER = ["Base", "GRPO", "GRPO (SGS Synth.)", "SGS", "SGS-OnPolicy-GRPO",
-                *[f"SGS-OnPolicy-GRPO (MV≥{r})" for r in ("0.25", "0.5", "0.75", "1.0")]]
+                *[f"SGS-OnPolicy-GRPO (MV≥{r})" for r in ("0.25", "0.5", "0.75", "1.0")],
+                *[f"SGS-OnPolicy-GRPO (MV≥{r}, {name})"
+                  for r in ("0.5", "0.75") for name in RSOLVE_NAMES.values()]]
 
 
 def load(results_dir):
