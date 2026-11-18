@@ -132,7 +132,7 @@ def main():
             # row label left of the Pass@5 axis label: the lengths this row trained on
             train_lengths = LENGTHS if config == "all" else config[1:].split("-")
             axes[i][0].annotate("Train Lengths\n" + ", ".join(train_lengths), xy=(-0.42, 0.5),
-                                xycoords="axes fraction", rotation=90, ha="right", va="center",
+                                xycoords="axes fraction", rotation=90, ha="right", va="center", multialignment="center",
                                 fontsize=FONT_SIZE)
         handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n) for n, c in METHODS.values()]
         handles.append(plt.Line2D([], [], color="gray", ls=":", lw=2.5, label="Base"))
