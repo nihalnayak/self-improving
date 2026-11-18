@@ -31,7 +31,7 @@ import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 
-FONT_SIZE = 16
+FONT_SIZE = 22
 LENGTHS = ["8", "16", "32", "64", "128"]
 VAL_DATASET = "files/data/sorting/sorting_val_100.jsonl"
 # same colors as sort_eval.py's tab10 METHOD_ORDER palette
@@ -103,11 +103,13 @@ def main():
     df.to_csv(args.results_dir / "sort_curves.csv", index=False)
 
     sns.set_theme(style="whitegrid", rc={"font.size": FONT_SIZE, "axes.titlesize": FONT_SIZE,
-                                         "axes.labelsize": FONT_SIZE, "legend.fontsize": FONT_SIZE})
+                                         "axes.labelsize": FONT_SIZE, "legend.fontsize": FONT_SIZE,
+                                         "xtick.labelsize": FONT_SIZE - 4, "ytick.labelsize": FONT_SIZE - 4})
     palette = {name: color for name, color in METHODS.values()}
     for split in ("train", "val"):
-        fig, axes = plt.subplots(len(configs), len(LENGTHS), figsize=(4 * len(LENGTHS), 3.5 * len(configs)),
+        fig, axes = plt.subplots(len(configs), len(LENGTHS), figsize=(4.5 * len(LENGTHS), 4 * len(configs)),
                                  sharex=True, sharey=True, squeeze=False)
+        titled = set()  # column title on the first non-empty panel (train skips lengths)
         for i, config in enumerate(configs):
             base = base_pass(args.results_dir, config)
             for j, length in enumerate(LENGTHS):
@@ -117,17 +119,23 @@ def main():
                     ax.axis("off")
                     continue
                 sns.lineplot(data=d, x="epoch", y="pass", hue="method", palette=palette,
-                             marker="o", ax=ax, legend=False)
+                             marker="o", markersize=10, linewidth=2.5, ax=ax, legend=False)
                 ax.axhline(base[split, length], ls=":", color="gray", lw=2)
                 ax.set_ylim(-0.03, 1.03)
-                ax.set_title(f"len {length}")
-                ax.set_xlabel("epoch / iter" if i == len(configs) - 1 else "")
-                ax.set_ylabel(("train: all lengths" if config == "all" else
-                               "train: " + ", ".join(config[1:].split("-"))) + f"\n{split} pass@5"
-                              if j == 0 else "")
+                ax.set_xticks(range(6))
+                if length not in titled:
+                    ax.set_title(f"Length {length}")
+                    titled.add(length)
+                ax.set_xlabel("Epoch / Iteration" if i == len(configs) - 1 else "")
+                ax.set_ylabel(f"{split.capitalize()} Pass@5" if j == 0 else "")
                 ax.tick_params(labelbottom=True, labelleft=True)
-        handles = [plt.Line2D([], [], color=c, marker="o", label=n) for n, c in METHODS.values()]
-        handles.append(plt.Line2D([], [], color="gray", ls=":", lw=2, label="Base"))
+            # row label right of the last panel: the lengths this row trained on
+            train_lengths = LENGTHS if config == "all" else config[1:].split("-")
+            axes[i][-1].annotate("Train Lengths\n" + ", ".join(train_lengths), xy=(1.06, 0.5),
+                                 xycoords="axes fraction", rotation=270, ha="left", va="center",
+                                 fontsize=FONT_SIZE - 2, fontweight="bold")
+        handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n) for n, c in METHODS.values()]
+        handles.append(plt.Line2D([], [], color="gray", ls=":", lw=2.5, label="Base"))
         fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
                    bbox_to_anchor=(0.5, 1.0))
         fig.tight_layout()
