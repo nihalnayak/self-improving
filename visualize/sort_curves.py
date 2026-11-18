@@ -129,11 +129,11 @@ def main():
                 ax.set_xlabel("Epoch / Iteration" if i == len(configs) - 1 else "")
                 ax.set_ylabel(f"{split.capitalize()} Pass@5" if j == 0 else "")
                 ax.tick_params(labelbottom=True, labelleft=True)
-            # row label right of the last panel: the lengths this row trained on
+            # row label left of the Pass@5 axis label: the lengths this row trained on
             train_lengths = LENGTHS if config == "all" else config[1:].split("-")
-            axes[i][-1].annotate("Train Lengths\n" + ", ".join(train_lengths), xy=(1.06, 0.5),
-                                 xycoords="axes fraction", rotation=270, ha="left", va="center",
-                                 fontsize=FONT_SIZE - 2, fontweight="bold")
+            axes[i][0].annotate("Train Lengths\n" + ", ".join(train_lengths), xy=(-0.42, 0.5),
+                                xycoords="axes fraction", rotation=90, ha="right", va="center",
+                                fontsize=FONT_SIZE)
         handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n) for n, c in METHODS.values()]
         handles.append(plt.Line2D([], [], color="gray", ls=":", lw=2.5, label="Base"))
         fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
