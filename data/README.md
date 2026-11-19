@@ -1,6 +1,6 @@
 # data
 
-Task datasets used by the trainers and evals in this repo. Currently there is one task family: **sorting**.
+Task datasets used by the trainers and evals in this repo. There are two task families: **sorting** and **multiplication**.
 
 ```
 data/
@@ -10,6 +10,12 @@ data/
     sorting_1000_L8-16-128.jsonl     train, lengths 8, 16, 128
     sorting_1000_L8-16-32-128.jsonl  train, lengths 8, 16, 32, 128
     sorting_val_100.jsonl            validation, all lengths
+  multiplication/
+    multiplication_1000.jsonl              train, all digit counts
+    multiplication_1000_L2-10.jsonl        train, digits 2, 10
+    multiplication_1000_L2-4-10.jsonl      train, digits 2, 4, 10
+    multiplication_1000_L2-4-6-10.jsonl    train, digits 2, 4, 6, 10
+    multiplication_val_100.jsonl           validation, all digit counts
 ```
 
 ## Sorting task
@@ -80,3 +86,36 @@ python misc/gen_sort_data.py --per-length 20 --seed 1        --out data/sorting/
 1. Generate it with `misc/gen_sort_data.py` into `data/sorting/`, keeping the `{"list", "sorted"}` schema.
 2. To train on it, pass `--dataset data/sorting/<file>` to any `python -m sgs.<trainer>`. For slurm, add it to the `CONFIGS`/`FILES` arrays in the `slurm_scripts/train/*.sbatch` scripts.
 3. To evaluate on it, pass `DATASETS="<split>=data/sorting/<file>"` to `slurm_scripts/eval/eval_sort.sbatch`.
+
+## Multiplication task
+
+**Task.** Multiply two non-negative integers.
+
+**Record format.** One problem per line: `{"number1": 4821, "number2": 7350, "product": 35434350}`. Both operands have the same digit count with no leading zeros, and `product == number1 * number2`.
+
+**Difficulty = operand digit count.** Digit counts are 2, 4, 6, 8, 10.
+
+### Files
+
+| file | rows | digits (rows each) |
+| --- | --- | --- |
+| `multiplication_1000.jsonl` | 1000 | 2, 4, 6, 8, 10 (200) |
+| `multiplication_1000_L2-10.jsonl` | 1000 | 2, 10 (500) |
+| `multiplication_1000_L2-4-10.jsonl` | 1000 | 2, 4 (333), 10 (334) |
+| `multiplication_1000_L2-4-6-10.jsonl` | 1000 | 2, 4, 6, 10 (250) |
+| `multiplication_val_100.jsonl` | 100 | 2, 4, 6, 8, 10 (20) |
+
+- No val pair appears in any train file, and pairs are unique within a file. Pairs are compared unordered, so `(a, b)` and `(b, a)` count as the same pair. This matters at 2 digits, where only 8100 ordered pairs exist.
+
+### Regenerating
+
+```bash
+V=data/multiplication/multiplication_val_100.jsonl
+python misc/gen_multiplication_data.py --per-length 20 --seed 1 --lengths 2,4,6,8,10 --out $V
+python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,6,8,10 --exclude $V --out data/multiplication/multiplication_1000.jsonl
+python misc/gen_multiplication_data.py --n 1000 --lengths 2,10       --exclude $V --out data/multiplication/multiplication_1000_L2-10.jsonl
+python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,10     --exclude $V --out data/multiplication/multiplication_1000_L2-4-10.jsonl
+python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,6,10   --exclude $V --out data/multiplication/multiplication_1000_L2-4-6-10.jsonl
+```
+
+`--exclude` skips pairs that appear in the given JSONL.
