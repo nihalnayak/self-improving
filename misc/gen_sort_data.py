@@ -13,7 +13,7 @@ Defaults produce 1000 samples balanced across lengths {8, 16, 32, 64,
 Usage:
     python misc/gen_sort_data.py
     python misc/gen_sort_data.py --seed 1 --out files/data/sorting/sorting_seed1.jsonl
-    python misc/gen_sort_data.py --n 1000 --lengths 8,16,128 --out files/data/sorting/sorting_1000_L8-16-128.jsonl
+    python misc/gen_sort_data.py --n 1000 --lengths 8,16,32,64,128 --out files/data/sorting/sorting_1000_L8-16-32-64-128.jsonl
 """
 
 import argparse
