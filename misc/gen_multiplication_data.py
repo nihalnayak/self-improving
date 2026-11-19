@@ -41,6 +41,9 @@ def main() -> None:
     p.add_argument("--n", type=int, default=None,
                    help="total samples split evenly across lengths "
                         "(remainder to the last lengths); overrides --per-length")
+    p.add_argument("--exclude", type=Path, default=None,
+                   help="JSONL of pairs to skip (e.g. the val split); "
+                        "pairs are also unique within the output")
     args = p.parse_args()
 
     lengths = [int(x) for x in args.lengths.split(",") if x.strip()]
@@ -54,12 +57,24 @@ def main() -> None:
     else:
         counts = [args.n // k + (i >= k - args.n % k) for i in range(k)]
     rng = random.Random(args.seed)
+    # unordered pairs already used: a*b == b*a, so (a, b) and (b, a) collide
+    seen = set()
+    if args.exclude is not None:
+        for line in args.exclude.open():
+            r = json.loads(line)
+            seen.add(tuple(sorted((r["number1"], r["number2"]))))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with args.out.open("w") as f:
         for L, c in zip(lengths, counts):
             for _ in range(c):
-                f.write(json.dumps(gen_sample(L, rng)) + "\n")
+                while True:
+                    row = gen_sample(L, rng)
+                    key = tuple(sorted((row["number1"], row["number2"])))
+                    if key not in seen:
+                        break
+                seen.add(key)
+                f.write(json.dumps(row) + "\n")
                 n += 1
 
     print(f"wrote {n} rows to {args.out}")
