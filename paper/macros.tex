@@ -19,3 +19,11 @@
 \newcommand{\mean}{\operatorname{mean}}
 \newcommand{\std}{\operatorname{std}}
 \newcommand{\minmax}{\operatorname{minmax}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+
+\newif\ifcomments
+\commentstrue
+
+\newcommand{\nihal}[1]{\ifcomments\textcolor{blue}{[NN: #1]}\fi\ignorespaces}
+\newcommand{\dam}[1]{\ifcomments\textcolor{cyan}{[DAM: #1]}\fi\ignorespaces}

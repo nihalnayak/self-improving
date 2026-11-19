@@ -1,0 +1,26 @@
+\section{Self Play with Algorithmic Tasks}
+
+\nihal{state a higher level goal maybe? or something more precise to this experiment. This experiment is not very clear.}
+Here our goal is study the relationship the role of a difficulty ladder in predicting the success of the self-play and GRPO and the role of itearative training used in self-play. 
+\nihal{there are more things to add here but just adding my thoughts so far.}
+
+\subsection{Data}
+\nihal{explain the exact }
+
+\subsection{Implementation Details}
+We implement the SGS~\citep{bailey2026scaling} in \texttt{verl}~\citep{....}, a self-play framework where the proposer and the solver are jointly trained. 
+Based on our initial experiments with SGS, we found that the framework with REINFORCE$^{1/2}$ underperforms as it mostly use off-policy generations to update the solver. 
+We improved SGS by replacing REINFORCE$^{1/2}$ with GRPO~\citep{...} to train the solver and use REINFORCE to train the proposer (Appendix ~\ref{...}). 
+We train conjecture and solver for five iterations during which the conjecture proposes generates synthetic tasks to match the competence of the solver.
+We also consider onpolicy GRPO (\textbf{GRPO}) as a baseline~\citep{...}. 
+In addition, we consider a new baseline called GRPO-SGS-Synth, where augment the training dataset with synthetic data generated in the SGS framework and train the LLM with GPRO.
+Unlike SGS, in GRPO-SGS-Synth we train a single solver LLM thereby decoupling the proposer and the solver used in self-play. 
+Finally, we consider On Policy Self Distillation (OPSD)~\citep{...} as a baseline where the model with trained with a KL loss between the student and the teacher which is the same model with privileged hints. 
+The loss is backpropagated only through the student model. 
+Here we provide the final solution as the privileged hint to the teacher.
+
+\subsection{Results}
+SGS and GRPO (SGS Synth.) outperforms GRPO when the training on the hardest tasks, suggesting that self play is useful when there is a big gap between the task difficulties. 
+GRPO (SGS Synth.) is competitive with SGS suggesting we can decouple the iterative training where the student and the teacher are iteratively trained. 
+Finally, OPSD outperforms everything on this task. 
+One reason why OPSD could be working so well is because the task prompt contains the entire list and the solution is also the entire list sorted, which could be making it easier to solve. This might not work for many practical tasks where most of the heavy lifting is done by the intermediate computation which might not be available. @Eric Xu is looking at tasks such as multiplication where all the intermediate computation is not present in the solution.

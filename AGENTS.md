@@ -72,6 +72,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Body only when the *why* isn't obvious from the diff. Wrap at 72 chars.
 - No AI attribution trailers, no "generated with" lines.
 
+## 6. Project Environment
+
+If `env.sh` exists at the repo root, it defines this project's base setup
+(modules, Python env, HF cache). `source env.sh` before running anything,
+on the node or inside a new sbatch. Don't copy module/env lines from older
+scripts; some are outdated. If a version changes, edit `env.sh`.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

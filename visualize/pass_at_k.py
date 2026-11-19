@@ -196,7 +196,9 @@ def build_plot(
 def load_sort_pass_at_k(results_dir: Path) -> pd.DataFrame:
     """Long table: label, split, length (str, incl. "all"), k, pass (unbiased pass@k)."""
     rows = []
-    for label_dir in sorted(p for p in results_dir.iterdir() if p.is_dir()):
+    # OPSD's teacher sees the gold sorted list: not a fair comparison, so not plotted.
+    for label_dir in sorted(p for p in results_dir.iterdir()
+                            if p.is_dir() and not p.name.startswith("opsd-")):
         for split in ("train", "val"):
             files = sorted(label_dir.rglob(f"{split}_samples.jsonl"))
             if not files:
