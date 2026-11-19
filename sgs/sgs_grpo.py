@@ -48,10 +48,10 @@ from pathlib import Path
 import numpy as np
 import ray
 
-from sgs.common import load_targets, parse_sorted, ray_runtime_env, solver_messages
-from sgs.sgs_simple import (Policy, build_verl_config, conj_messages, evaluate, guide_messages,
-                            guide_score, minmax, parse_conjecture, parse_guide, phase,
-                            response_stats, solve_rate_rewards)
+from sgs.common import ray_runtime_env
+from sgs.sgs_simple import (Policy, build_verl_config, evaluate, guide_score, minmax, parse_guide,
+                            phase, response_stats, solve_rate_rewards)
+from sgs.tasks import TASKS
 
 
 # =============================================================================
@@ -59,8 +59,11 @@ from sgs.sgs_simple import (Policy, build_verl_config, conj_messages, evaluate, 
 # =============================================================================
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="SGS with a GRPO Solver on sorting with verl")
-    ap.add_argument("--dataset", required=True, help="jsonl with a `list` field per row")
+    ap = argparse.ArgumentParser(description="SGS with a GRPO Solver with verl")
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting",
+                    help="prompts, verifier and data format (sgs/tasks.py)")
+    ap.add_argument("--dataset", required=True,
+                    help="jsonl of targets (sorting: `list`; multiplication: `number1`, `number2`)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--model", default="Qwen/Qwen3-4B",
                     help="init for Solver, Conjecturer and Guide (separate copies)")
@@ -84,7 +87,8 @@ def parse_args(argv=None):
                     default="percentile",
                     help="R_solve rule: percentile = Alg. 1 (0 if s=0 or top too-easy-frac, "
                          "else 1-s); learnability = s(1-s); rzero = 1-2|s-0.5| (R-Zero)")
-    ap.add_argument("--lo", type=int, default=0, help="integer range shown to Conjecturer")
+    ap.add_argument("--lo", type=int, default=0,
+                    help="integer range shown to the sorting Conjecturer")
     ap.add_argument("--hi", type=int, default=10000)
     ap.add_argument("--thinking", action="store_true",
                     help="enable_thinking=True in the chat template (all three models)")
@@ -178,23 +182,24 @@ def solver_grpo_update(t, args, solver, guide, rollouts, v, timing):
 
 def conjecture(t, args, targets, todo, conj, timing):
     """Step 2: one conjecture per target in `todo`. Returns (rollouts, records)."""
+    task = TASKS[args.task]
     conj_rollouts, conj_texts = None, []
     if todo:
         with phase(t, "conj_gen", timing, f"{len(todo)} prompts"):
             conj_rollouts, conj_texts = conj.generate(
-                [conj_messages(targets[i], args.lo, args.hi) for i in todo], n=1, step=t)
+                [task.conj_messages(targets[i], args.lo, args.hi) for i in todo], n=1, step=t)
     conjs = []   # one record per prompted target, aligned with conj_rollouts rows
     for i, text in zip(todo, conj_texts):
-        statement, xs = parse_conjecture(text)
-        valid = xs is not None and len(xs) >= 2
+        statement, problem = task.conjecture(text)   # problem None if unparsable / invalid
         conjs.append({"target_idx": i, "target": targets[i], "completion": text,
-                      "statement": statement, "problem": xs if valid else None})
+                      "statement": statement, "problem": problem})
     return conj_rollouts, conjs
 
 
 def reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, conj, guide,
                            rng, timing):
     """Steps 4, 5, 7 (unchanged from sgs_simple). Returns metrics."""
+    task = TASKS[args.task]
     m = {}
     for c, s in zip(synth, synth_rates):
         c["solve_rate"] = float(s)
@@ -203,7 +208,7 @@ def reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, co
     if synth:
         with phase(t, "guide_gen", timing, f"{len(synth)} pairs"):
             _, guide_texts = guide.generate(
-                [guide_messages(c["target"], c["statement"]) for c in synth], n=1, step=t)
+                [task.guide_messages(c["target"], c["statement"]) for c in synth], n=1, step=t)
         for c, text in zip(synth, guide_texts):
             c["guide_completion"] = text
             c["guide_scores"] = parse_guide(text)
@@ -240,7 +245,8 @@ def reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, co
     m.update({
         "conj/n_generated": len(conjs),
         "conj/parse_rate": len(synth) / max(1, len(conjs)),
-        "conj/mean_len": float(np.mean([len(c["problem"]) for c in synth])) if synth else 0.0,
+        # mean difficulty level: list length (sorting) / operand digits (multiplication)
+        "conj/mean_len": float(np.mean([task.level(c["problem"]) for c in synth])) if synth else 0.0,
         "synth/mean_solve_rate": float(np.mean(synth_rates)) if synth else 0.0,
         "synth/frac_s0": float((synth_rates == 0).mean()) if synth else 0.0,
         "synth/frac_s1": float((synth_rates == 1).mean()) if synth else 0.0,
@@ -276,6 +282,7 @@ def target_metrics(ids, unsolved, rates, solved):
 def sgs_grpo_iteration(t, args, targets, solved, solver, conj, guide, rng):
     """Run one SGS-GRPO iteration in place on `solved`. Returns (metrics, sample records)."""
     m, timing = {}, {}
+    task = TASKS[args.task]
 
     # --- steps 1-2: batch B, conjectures -------------------------------------
     ids, unsolved, todo = batch_ids(args, targets, solved, rng)
@@ -287,8 +294,9 @@ def sgs_grpo_iteration(t, args, targets, solved, solver, conj, guide, rng):
     k = args.k
     with phase(t, "solver_gen", timing,
                f"{len(problems)} problems x {k} = {len(problems) * k} rollouts"):
-        sol_rollouts, sol_texts = solver.generate([solver_messages(p) for p in problems], n=k, step=t)
-    v = np.array([float(parse_sorted(sol_texts[j]) == sorted(problems[j // k]))
+        sol_rollouts, sol_texts = solver.generate([task.solver_messages(p) for p in problems],
+                                                  n=k, step=t)
+    v = np.array([float(task.verify(sol_texts[j], problems[j // k]))
                   for j in range(len(sol_texts))])
     rates = v.reshape(len(problems), k).mean(axis=1)
     for pos, i in enumerate(ids):
@@ -337,10 +345,11 @@ class GRPORunner:
         (out_dir / "eval_samples").mkdir(parents=True, exist_ok=True)
         (out_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
 
-        targets = load_targets(args.dataset)
+        task = TASKS[args.task]
+        targets = task.load(args.dataset)
         solved = [False] * len(targets)
-        print(f"[data] {len(targets)} targets from {args.dataset}", flush=True)
-        val_targets = load_targets(args.val_dataset) if args.val_dataset else None
+        print(f"[data] {len(targets)} {args.task} targets from {args.dataset}", flush=True)
+        val_targets = task.load(args.val_dataset) if args.val_dataset else None
         if val_targets:
             print(f"[data] {len(val_targets)} val targets from {args.val_dataset}", flush=True)
 
@@ -362,9 +371,9 @@ class GRPORunner:
             print(f"[wandb] {wandb.run.url}", flush=True)
 
         def run_eval(t):
-            ev, rows = evaluate(t, targets, solver)
+            ev, rows = evaluate(t, targets, solver, task=task)
             if val_targets:
-                val_ev, val_rows = evaluate(t, val_targets, solver, prefix="val")
+                val_ev, val_rows = evaluate(t, val_targets, solver, prefix="val", task=task)
                 ev.update(val_ev)
                 rows += val_rows
             with open(out_dir / "eval_samples" / f"iter_{t:04d}.jsonl", "w") as f:

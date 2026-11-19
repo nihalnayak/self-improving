@@ -119,3 +119,7 @@ python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,6,10   --exclude $
 ```
 
 `--exclude` skips pairs that appear in the given JSONL.
+
+### Training
+
+`sgs.solver_simple` and `sgs.sgs_onpolicy_grpo` (and `sgs.sgs_grpo`) take `--task multiplication`. The prompts, verifier and loader are `Multiplication` in `sgs/tasks.py`. The Solver prompt and the answer parser come verbatim from `misc/multiplication_benchmark.py`. Per-digit metrics are logged as `len_{digits}`. For slurm, set `TASK_NAME=multiplication` with `slurm_scripts/train/{grpo,sgs_onpolicy_grpo}.sbatch`. The array tasks 0-3 map to `L2-10`, `L2-4-10`, `L2-4-6-10` and `all`.

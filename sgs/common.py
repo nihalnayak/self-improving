@@ -1,58 +1,19 @@
 """Primitives shared by sgs_simple (SGS) and solver_simple (GRPO / REINFORCE++ baselines).
 
-    Solver prompt + verifier    misc/sort_benchmark.py prompt and answer parser
+    Solver prompt + verifier    re-exported from sgs/tasks.py (sorting)
     load_targets                sorting jsonl -> list of integer lists
     PatchedActorRolloutRefWorker  verl worker with the two fixes this env needs
     ray_runtime_env             verl's Ray env + repo on PYTHONPATH + HF/wandb vars
 """
 
 import os
-import re
 from pathlib import Path
 
 from verl.workers.engine_workers import ActorRolloutRefWorker
 from verl.single_controller.base.decorator import Dispatch, register
 
-
-# =============================================================================
-# Solver prompt + verifier
-# =============================================================================
-
-# Solver: verbatim from misc/sort_benchmark.py.
-SOLVER_PROMPT = (
-    "Sort the numbers in the list in ascending order.\n\n"
-    "List: {list_str}\n\n"
-    "Return only the sorted list on a single line, enclosed in \\boxed{{}}, "
-    "e.g. \\boxed{{[1, 2, 3]}}."
-)
-
-
-def user_msg(text):
-    """One-turn chat. verl applies the chat template to this, never us."""
-    return [{"role": "user", "content": text}]
-
-
-def solver_messages(xs):
-    return user_msg(SOLVER_PROMPT.format(list_str=str(xs)))
-
-
-_BOXED_RE = re.compile(r"\\boxed\{(.*?)\}", re.DOTALL)
-_BRACKET_RE = re.compile(r"\[([^\[\]]*)\]")
-_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
-
-
-def _nums(s):
-    nums = _NUM_RE.findall(s)
-    return [float(n) for n in nums] if nums else None
-
-
-def parse_sorted(text):
-    """Solver answer: first \\boxed{...}, else last [...] (misc/sort_benchmark.py)."""
-    m = _BOXED_RE.search(text)
-    if m:
-        return _nums(m.group(1))
-    brackets = _BRACKET_RE.findall(text)
-    return _nums(brackets[-1]) if brackets else None
+# Sorting's Solver prompt + verifier live in sgs/tasks.py; re-exported for old callers.
+from sgs.tasks import SOLVER_PROMPT, parse_sorted, solver_messages, user_msg  # noqa: F401
 
 
 # =============================================================================
@@ -60,9 +21,9 @@ def parse_sorted(text):
 # =============================================================================
 
 def load_targets(path):
-    """Target lists from a jsonl with a `list` field per row."""
-    from datasets import load_dataset
-    return [list(row["list"]) for row in load_dataset("json", data_files=path, split="train")]
+    """Sorting target lists from a jsonl with a `list` field per row."""
+    from sgs.tasks import Sorting
+    return Sorting.load(path)
 
 
 # =============================================================================

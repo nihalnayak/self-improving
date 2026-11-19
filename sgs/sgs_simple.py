@@ -53,8 +53,9 @@ import numpy as np
 import ray
 import torch
 
-from sgs.common import (PatchedActorRolloutRefWorker, _BRACKET_RE, _nums, load_targets,
-                        parse_sorted, ray_runtime_env, solver_messages, user_msg)
+from sgs.common import (PatchedActorRolloutRefWorker, load_targets, parse_sorted,
+                        ray_runtime_env, solver_messages)
+from sgs.tasks import Sorting
 
 
 # =============================================================================
@@ -111,124 +112,15 @@ def parse_args(argv=None):
 # §2 Prompts
 # =============================================================================
 
-# Conjecturer: verbatim from misc/sort_proposer.py. `example_list` is the
-# unsolved target x, which is how the Conjecturer is conditioned on x.
-CONJ_PROMPT = (
-    "I am learning to sort lists of integers in [{lo}, {hi}] in "
-    "ascending order. This is the task I ultimately want to solve. "
-    "Here is one example sorting problem for reference:\n\n"
-    "List: {example_list}\n\n"
-    "To make progress, I want to first practice on a simpler version: "
-    "a shorter and easier sorting problem. "
-    "Learning to solve this simpler task will be a "
-    "stepping stone toward solving the more challenging "
-    "task.\n\n"
-    "Generate one such simpler sorting problem and its solution. "
-    "The input list must NOT already be sorted and must NOT be an "
-    "obvious canonical example. The solution must contain exactly "
-    "the same integers, including duplicates, in ascending order.\n\n"
-    "Return exactly the following two blocks, replacing the placeholder "
-    "lists with actual integers:\n\n"
-    "<problem>\n"
-    "Sort the numbers in the list in ascending order.\n"
-    "List: [a, b, c, ...]\n"
-    "</problem>\n"
-    "<solution>\n"
-    "[sorted integers]\n"
-    "</solution>\n\n"
-    "Write each list on a single line using comma-separated integers. "
-    "Do not include reasoning, explanations, Markdown fences, LaTeX, "
-    "or any text outside these two blocks."
-)
-
-# Guide: paper §E.3 (relevance 0-5, redundancy 0/1, complexity 0-4), with the
-# Lean "lemma / premises / conclusion" wording mapped onto sorting problems.
-GUIDE_PROMPT = (
-    "You are a sorting expert. Here is a seed sorting problem:\n\n"
-    "<seed>\n{seed}\n</seed>\n\n"
-    "Here is a simpler sorting problem that is supposed to be useful for "
-    "solving the above problem. It can be useful in that either it is a "
-    "smaller version of the seed problem that can be directly used as a "
-    "stepping stone, or it is a related problem that plausibly requires "
-    "similar skills to solve.\n\n"
-    "<problem>\n{conjecture}\n</problem>\n\n"
-    "Please rate the relevance of the problem to the seed problem on a scale "
-    "of 0 to 5, where 0 is \"not at all related\" and 5 is \"very useful for "
-    "solving the seed problem.\" If the problem is trivial, you should give "
-    "it a low score.\n\n"
-    "Here is a rubric for how to score the problem:\n"
-    "- 0: The problem is not at all related to the seed problem and is "
-    "trivial to solve (e.g. the list has two or fewer numbers or is already "
-    "sorted). OR the problem is identical to the seed problem (the same "
-    "numbers, possibly reordered).\n"
-    "- 1: The problem is not at all related to the seed problem (e.g. it is "
-    "not a problem of sorting a list of integers in ascending order).\n"
-    "- 2: The problem is related to the seed problem in that it is a sorting "
-    "problem, but it is not directly useful for solving the seed problem "
-    "(e.g. it is not simpler than the seed problem, or its numbers look "
-    "nothing like the seed's).\n"
-    "- 3: The problem is related to the seed problem and may be useful for "
-    "solving the seed problem.\n"
-    "- 4: The problem is directly useful for solving the seed problem. That "
-    "is, if the problem was solved, the seed problem would be easier to solve "
-    "(e.g. a shorter list whose numbers have similar size, duplicates and "
-    "ordering patterns).\n"
-    "- 5: The problem is very useful for solving the seed problem, and "
-    "solving it will dramatically reduce the difficulty of the seed "
-    "problem.\n\n"
-    "Next decide how redundant the problem statement is. Rate this as 0 or 1:\n"
-    "- 0: There is nothing redundant in the problem statement.\n"
-    "- 1: There are redundant parts. That is, instructions, constraints or "
-    "text that are not needed to state the sorting task.\n\n"
-    "Next decide if the problem statement is overly complex. Rate this on a "
-    "score of 0 to 4:\n"
-    "- 0: The problem is minimally complex. A single instruction to sort a "
-    "single list that is maximally clear.\n"
-    "- 1: The problem has low complexity. Multiple related parts, but they "
-    "form a cohesive sorting task.\n"
-    "- 2: The problem has moderate complexity. Contains a few extra "
-    "conditions or alternatives that are all on-theme.\n"
-    "- 3: The problem has high complexity. Contains multiple unrelated tasks "
-    "or conditions, or nested instructions that obscure the main sorting "
-    "task.\n"
-    "- 4: The problem has very high complexity. Many largely unrelated tasks "
-    "or deeply nested instructions that are hard to parse.\n\n"
-    "End your response with the three scores in exactly this format:\n"
-    "<relevance>N</relevance>\n"
-    "<redundancy>N</redundancy>\n"
-    "<complexity>N</complexity>"
-)
-
-# How a target is shown to the Guide (same statement format the Conjecturer emits).
-SEED_STATEMENT = "Sort the numbers in the list in ascending order.\nList: {list_str}"
-
-
-def conj_messages(target, lo, hi):
-    return user_msg(CONJ_PROMPT.format(lo=lo, hi=hi, example_list=str(target)))
-
-
-def guide_messages(target, conj_statement):
-    seed = SEED_STATEMENT.format(list_str=str(target))
-    return user_msg(GUIDE_PROMPT.format(seed=seed, conjecture=conj_statement))
+# Conjecturer / Guide prompts for sorting live in sgs/tasks.py (re-exported here);
+# the Solver prompt is sgs.common.SOLVER_PROMPT.
+from sgs.tasks import (CONJ_PROMPT, GUIDE_PROMPT, SEED_STATEMENT,  # noqa: E402,F401
+                       conj_messages, guide_messages, parse_conjecture)
 
 
 # =============================================================================
 # §3 Parsing + rewards
 # =============================================================================
-
-_PROBLEM_RE = re.compile(r"<problem>(.*?)</problem>", re.DOTALL | re.IGNORECASE)
-def parse_conjecture(text):
-    """(statement, list) from the last non-empty <problem> block (misc/sort_proposer.py).
-
-    Returns (None, None) if there is no block or no bracketed list inside it.
-    """
-    blocks = [b.strip() for b in _PROBLEM_RE.findall(text) if b.strip()]
-    if not blocks:
-        return None, None
-    brackets = _BRACKET_RE.findall(blocks[-1])
-    xs = _nums(brackets[-1]) if brackets else None
-    return (blocks[-1], xs) if xs else (None, None)
-
 
 def parse_guide(text):
     """(relevance, redundancy, complexity) from the last tag of each kind, or None."""
@@ -659,13 +551,14 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
     return m, {"conjectures": conjs, "solver_examples": solver_examples}
 
 
-def evaluate(t, targets, solver, n=5, prefix="eval"):
-    """Solver pass@n on all targets, overall and per list length (misc/sort_benchmark.py).
+def evaluate(t, targets, solver, n=5, prefix="eval", task=Sorting):
+    """Solver pass@n on all targets, overall and per difficulty level (sorting: list
+    length; multiplication: operand digits; both logged as len_{L}).
     Returns (metrics, per-sample rows)."""
-    _, texts = solver.generate([solver_messages(x) for x in targets], n=n, step=t)
-    v = np.array([parse_sorted(texts[j]) == sorted(targets[j // n]) for j in range(len(texts))])
+    _, texts = solver.generate([task.solver_messages(x) for x in targets], n=n, step=t)
+    v = np.array([task.verify(texts[j], targets[j // n]) for j in range(len(texts))])
     passed = v.reshape(len(targets), n).any(axis=1)
-    lens = np.array([len(x) for x in targets])
+    lens = np.array([task.level(x) for x in targets])
     m = {f"{prefix}/pass@{n}/len_{L}": float(passed[lens == L].mean()) for L in sorted(set(lens.tolist()))}
     m[f"{prefix}/pass@{n}/all"] = float(passed.mean())
     rows = [{"split": prefix, "list": targets[j // n], "completion": texts[j], "correct": bool(v[j])}

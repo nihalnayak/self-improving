@@ -1,4 +1,4 @@
-"""SGS with an on-policy GRPO Solver, on sorting, built on verl.
+"""SGS with an on-policy GRPO Solver, on sorting or multiplication (--task), built on verl.
 
 Same as `sgs.sgs_grpo` (GRPO Solver with KL to the frozen Guide, unchanged
 REINFORCE Conjecturer, optional --all-targets) except for the Solver phase,
@@ -18,26 +18,32 @@ uses the training rollouts (dropped problems don't count this iteration).
 Usage (4 GPUs; see files/scripts/sgs/sgs_onpolicy_grpo_sorting_qwen3_4b.sbatch):
     python -m sgs.sgs_onpolicy_grpo --dataset files/data/sorting/sorting_1000.jsonl \
         --out-dir runs/sgs_onpolicy_grpo --n-gpus 4
+    python -m sgs.sgs_onpolicy_grpo --task multiplication \
+        --dataset data/multiplication/multiplication_1000.jsonl \
+        --val-dataset data/multiplication/multiplication_val_100.jsonl \
+        --out-dir runs/sgs_onpolicy_grpo_mult --n-gpus 4
 """
 
 import numpy as np
 import ray
 
-from sgs.common import parse_sorted, ray_runtime_env, solver_messages
+from sgs.common import ray_runtime_env
 from sgs.sgs_grpo import (GRPORunner, batch_ids, conjecture, parse_args, reward_and_update_conj,
                           solver_grpo_update, target_metrics)
 from sgs.sgs_simple import phase, response_stats
+from sgs.tasks import TASKS, Sorting
 
 
-def verify(texts, problems, k):
+def verify(texts, problems, k, task=Sorting):
     """Binary verifier per rollout (row j is sample j % k of problems[j // k])."""
-    return np.array([float(parse_sorted(texts[j]) == sorted(problems[j // k]))
+    return np.array([float(task.verify(texts[j], problems[j // k]))
                      for j in range(len(texts))])
 
 
 def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, rng):
     """Run one on-policy SGS-GRPO iteration in place on `solved`. Returns (metrics, samples)."""
     m, timing = {}, {}
+    task = TASKS[args.task]
 
     # --- steps 1-2: batch B, conjectures -------------------------------------
     ids, unsolved, todo = batch_ids(args, targets, solved, rng)
@@ -50,9 +56,9 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
     if synth:
         with phase(t, "synth_eval", timing,
                    f"{len(synth)} problems x {args.k} = {len(synth) * args.k} rollouts"):
-            _, texts = solver.generate([solver_messages(p) for p in synth_problems],
+            _, texts = solver.generate([task.solver_messages(p) for p in synth_problems],
                                        n=args.k, step=t)
-        synth_rates = verify(texts, synth_problems, args.k).reshape(len(synth), args.k).mean(axis=1)
+        synth_rates = verify(texts, synth_problems, args.k, task).reshape(len(synth), args.k).mean(axis=1)
 
     # --- steps 3 + 6: on-policy Solver GRPO, one optimizer step per chunk ----
     problems = [targets[i] for i in ids] + [c["problem"] for c in synth]
@@ -70,9 +76,9 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
         chunk_problems = [problems[p] for p in chunk]
         with phase(t, "solver_gen", timing, f"chunk {c_idx + 1}/{len(chunks)}: "
                    f"{len(chunk)} problems x {k} = {len(chunk) * k} rollouts"):
-            rollouts, texts = solver.generate([solver_messages(p) for p in chunk_problems],
+            rollouts, texts = solver.generate([task.solver_messages(p) for p in chunk_problems],
                                               n=k, step=t)
-        v = verify(texts, chunk_problems, k)
+        v = verify(texts, chunk_problems, k, task)
         rates[chunk] = v.reshape(len(chunk), k).mean(axis=1)
         trained[chunk] = True
         n_correct += int(v.sum())
