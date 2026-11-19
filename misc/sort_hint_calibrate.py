@@ -1,11 +1,16 @@
-"""Calibrate natural-language hints so a 128-length sort hits t/5 solve rate.
+"""Calibrate answer-span hints so a 128-length sort hits t/5 solve rate.
 
 One random list of `--length` ints in [lo, hi]. The solver (Qwen3-4B, prompt
-from misc/sort_benchmark.py) can't sort it unaided. For each target
-t in {1..5}, a hint-writer LLM (same engine, sees the gold answer) rewrites a
-natural-language hint; we check the solver's solves/n with that hint and feed
-the result back to the writer, until solves == t or `--max-rounds` is hit.
-The best hint per target is then re-checked on a fresh draw (final result).
+from misc/sort_benchmark.py) can't sort it unaided. A hint is a literal piece
+of the gold sorted list; the target t fixes which piece (PATTERN):
+    t=5,4 -> first + middle + last k values   (easy)
+    t=3,2 -> middle k values                  (medium)
+    t=1   -> last k values                    (hard)
+A hint-writer LLM (same engine, sees the gold answer) picks only the span
+length k; the hint text is rendered from gold, so every value is correct. We
+check the solver's solves/n with that hint and feed k -> solves back to the
+writer, until solves == t or `--max-rounds` is hit. The best hint per target
+is then re-checked on a fresh draw (final result).
 
 Usage:
     python -m misc.sort_hint_calibrate
@@ -24,24 +29,28 @@ from vllm import LLM, SamplingParams
 from misc.sort_benchmark import PROMPT_TEMPLATE, parse_sorted
 
 
+PATTERN = {5: "fml", 4: "fml", 3: "m", 2: "m", 1: "l"}   # f=first, m=middle, l=last
+PATTERN_TEXT = {
+    "fml": "the first K, the middle K and the last K values of the sorted answer",
+    "m": "K consecutive values from the middle of the sorted answer",
+    "l": "the last K values of the sorted answer",
+}
+
 HINT_WRITER_TEMPLATE = (
     "A language model is asked to sort this list of {L} integers in "
     "ascending order:\n\n"
     "List: {xs}\n\n"
     "The correct sorted answer is:\n\n"
     "Sorted: {gold}\n\n"
-    "The model sees the list plus a natural-language hint. We sample it "
-    "{n} times. We want it to get the exact sorted list right in exactly "
-    "{t} of {n} attempts: not more, not less.\n\n"
-    "Previous attempts (hint -> correct answers out of {n}):\n{history}\n\n"
-    "Write a new hint. If the model solved it too rarely, reveal more about "
-    "the answer; if too often, reveal less. Useful clues include: the "
-    "smallest and largest values, how many numbers fall in each range "
-    "(e.g. below 1000, 1000-1999, ...), some of the sorted values at the "
-    "start, middle or end, which values are duplicated, or a good "
-    "bucketing strategy.{full_rule} Write the hint as plain natural-language "
-    "sentences addressed to the model.\n\n"
-    "Return only the new hint inside <hint>...</hint>."
+    "The model sees the list plus a hint. We sample it {n} times. We want it "
+    "to get the exact sorted list right in exactly {t} of {n} attempts: not "
+    "more, not less.\n\n"
+    "The hint reveals {what}, written out exactly. You choose K. A larger K "
+    "reveals more of the answer, so the model will solve it more often; a "
+    "smaller K reveals less. K must be an integer from 1 to {cap}.\n\n"
+    "Previous attempts (K -> correct answers out of {n}; K=none means no "
+    "hint):\n{history}\n\n"
+    "Return only the new K inside <hint>...</hint>, e.g. <hint>8</hint>."
 )
 
 _HINT_RE = re.compile(r"<hint>(.*?)</hint>", re.DOTALL)
@@ -52,6 +61,25 @@ def chat(tok, content, thinking):
         [{"role": "user", "content": content}],
         tokenize=False, add_generation_prompt=True, enable_thinking=thinking,
     )
+
+
+def span_cap(L, pattern, full_ok):
+    """Largest K; below the full list unless full_ok (t == n)."""
+    if pattern == "fml":
+        return max(1, L // 3 if full_ok else (L - 1) // 3)
+    return L if full_ok else L - 1
+
+
+def render_hint(gold, pattern, k):
+    """Hint text with the requested spans of gold (1-indexed positions)."""
+    L = len(gold)
+    i = (L - k) // 2
+    parts = {
+        "f": f"The sorted answer starts with: {gold[:k]}.",
+        "m": f"Positions {i + 1}-{i + k} of the sorted answer are: {gold[i:i + k]}.",
+        "l": f"The sorted answer ends with: {gold[L - k:]}.",
+    }
+    return " ".join(parts[c] for c in pattern)
 
 
 def solver_text(xs, hint):
@@ -105,12 +133,14 @@ def main():
         return sum(parse_sorted(o.text) == gold for o in out[0].outputs)
 
     def write_hint(t, history):
+        """Returns (k or None, cap, raw writer text)."""
         call[0] += 1
-        hist = "\n".join(f"- {h!r} -> {s}/{n}" for h, s in history)
+        hist = "\n".join(f"- K={'none' if k is None else k} -> {s}/{n}"
+                         for k, _, s in history)
+        cap = span_cap(args.length, PATTERN[t], t == n)
         prompt = HINT_WRITER_TEMPLATE.format(
             L=args.length, xs=xs, gold=gold, n=n, t=t, history=hist,
-            full_rule="" if t == n else
-            " Do not write out the full sorted list.",
+            what=PATTERN_TEXT[PATTERN[t]], cap=cap,
         )
         sp = SamplingParams(n=1, temperature=0.7, top_p=0.95,
                             max_tokens=args.writer_max_tokens,
@@ -118,34 +148,36 @@ def main():
         raw = engine.generate([chat(tok, prompt, args.writer_thinking)], sp)[0].outputs[0].text
         body = raw.split("</think>")[-1]
         m = _HINT_RE.search(body)
-        return (m.group(1).strip() if m else ""), raw
+        km = re.search(r"\d+", m.group(1)) if m else None
+        k = min(max(int(km.group()), 1), cap) if km else None
+        return k, raw
 
     trace_f = open(out_dir / "trace.jsonl", "w")
     results = []
-    start_hint = ""
     for t in range(1, n + 1):
-        hint = start_hint
+        pattern = PATTERN[t]
+        k, hint = None, ""
         solves = solve(hint)
-        history = [(hint, solves)]
-        trace_f.write(json.dumps({"target": t, "round": 0, "hint": hint,
-                                  "solves": solves, "writer_raw": None}) + "\n")
-        print(f"[t={t}/{n} r=0] solves={solves}/{n} hint={hint[:200]!r}")
+        history = [(k, hint, solves)]
+        trace_f.write(json.dumps({"target": t, "round": 0, "pattern": pattern, "k": k,
+                                  "hint": hint, "solves": solves, "writer_raw": None}) + "\n")
+        print(f"[t={t}/{n} {pattern} r=0] k={k} solves={solves}/{n}")
         r = 0
         while solves != t and r < args.max_rounds:
             r += 1
-            hint, raw = write_hint(t, history)
+            k, raw = write_hint(t, history)
+            hint = "" if k is None else render_hint(gold, pattern, k)
             solves = solve(hint)
-            history.append((hint, solves))
-            trace_f.write(json.dumps({"target": t, "round": r, "hint": hint,
-                                      "solves": solves, "writer_raw": raw}) + "\n")
+            history.append((k, hint, solves))
+            trace_f.write(json.dumps({"target": t, "round": r, "pattern": pattern, "k": k,
+                                      "hint": hint, "solves": solves, "writer_raw": raw}) + "\n")
             trace_f.flush()
-            print(f"[t={t}/{n} r={r}] solves={solves}/{n} hint={hint[:200]!r}")
+            print(f"[t={t}/{n} {pattern} r={r}] k={k} solves={solves}/{n}")
         # closest to t, later round wins ties
         best_i = min(range(len(history)),
-                     key=lambda i: (abs(history[i][1] - t), -i))
-        best_hint, best_solves = history[best_i]
-        start_hint = best_hint
-        results.append({"target": t, "hint": best_hint,
+                     key=lambda i: (abs(history[i][2] - t), -i))
+        best_k, best_hint, best_solves = history[best_i]
+        results.append({"target": t, "pattern": pattern, "k": best_k, "hint": best_hint,
                         "prompt": solver_text(xs, best_hint),
                         "calib_solves": best_solves, "rounds": r})
     trace_f.close()
@@ -153,7 +185,8 @@ def main():
     print(f"\n=== final check (fresh draw, n={n}) ===")
     for res in results:
         res["final_solves"] = solve(res["hint"])
-        print(f"target {res['target']}/{n} | calib {res['calib_solves']}/{n} "
+        print(f"target {res['target']}/{n} | {res['pattern']} k={res['k']} "
+              f"| calib {res['calib_solves']}/{n} "
               f"| final {res['final_solves']}/{n} | rounds {res['rounds']}")
         print(f"  hint: {res['hint']}")
 
