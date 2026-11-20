@@ -1,6 +1,6 @@
 # data
 
-Task datasets used by the trainers and evals in this repo. There are two task families: **sorting** and **multiplication**.
+Task datasets used by the trainers and evals in this repo. There are four task families: **sorting**, **multiplication**, **LCM** and **preorder traversal**.
 
 ```
 data/
@@ -16,6 +16,19 @@ data/
     multiplication_1000_L2-4-10.jsonl      train, digits 2, 4, 10
     multiplication_1000_L2-4-6-10.jsonl    train, digits 2, 4, 6, 10
     multiplication_val_100.jsonl           validation, all digit counts
+  lcm/
+    lcm_1000.jsonl                   train, all digit counts         (all pairs)
+    lcm_1000_L2-32.jsonl             train, digits 2, 32
+    lcm_1000_L2-4-32.jsonl           train, digits 2, 4, 32
+    lcm_1000_L2-4-8-32.jsonl         train, digits 2, 4, 8, 32
+    lcm_val_100.jsonl                validation, all digit counts
+    lcm_wo_coprime_*.jsonl           same six files, only pairs with GCD > 1
+  preorder/
+    preorder_1000.jsonl              train, all node counts
+    preorder_1000_L8-128.jsonl       train, nodes 8, 128
+    preorder_1000_L8-16-128.jsonl    train, nodes 8, 16, 128
+    preorder_1000_L8-16-32-128.jsonl train, nodes 8, 16, 32, 128
+    preorder_val_100.jsonl           validation, all node counts
 ```
 
 ## Sorting task
@@ -123,3 +136,70 @@ python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,6,10   --exclude $
 ### Training
 
 `sgs.solver_simple` and `sgs.sgs_onpolicy_grpo` (and `sgs.sgs_grpo`) take `--task multiplication`. The prompts, verifier and loader are `Multiplication` in `sgs/tasks.py`. The Solver prompt and the answer parser come verbatim from `misc/multiplication_benchmark.py`. Per-digit metrics are logged as `len_{digits}`. For slurm, set `TASK_NAME=multiplication` with `slurm_scripts/train/{grpo,sgs_onpolicy_grpo}.sbatch`. The array tasks 0-3 map to `L2-10`, `L2-4-10`, `L2-4-6-10` and `all`.
+
+## LCM task
+
+**Task.** Compute the least common multiple of two positive integers.
+
+**Record format.** `{"number1": 12, "number2": 18, "lcm": 36}`. Both operands have the same digit count with no leading zeros, and `lcm == math.lcm(number1, number2)`.
+
+**Difficulty = operand digit count.** Digit counts are 2, 4, 8, 16, 32. These are the levels of the Qwen3-8B difficulty run (`files/results/qwen3_8b_difficulty/lcm.no-thinking.log`: pass@5 99 / 18 / 0 / 0 / 0), capped at 32.
+
+**Two variants.** `lcm_*` uses uniform random pairs, and about 60% of them are coprime (GCD 1). For those pairs the LCM is just the product, so the task reduces to multiplication. `lcm_wo_coprime_*` resamples coprime pairs (`--exclude-coprime`), so every pair has GCD > 1. Each variant has its own val split, and both use the same task (`--task lcm`).
+
+| file | rows | digits (rows each) |
+| --- | --- | --- |
+| `lcm_1000.jsonl` | 1000 | 2, 4, 8, 16, 32 (200) |
+| `lcm_1000_L2-32.jsonl` | 1000 | 2, 32 (500) |
+| `lcm_1000_L2-4-32.jsonl` | 1000 | 2, 4 (333), 32 (334) |
+| `lcm_1000_L2-4-8-32.jsonl` | 1000 | 2, 4, 8, 32 (250) |
+| `lcm_val_100.jsonl` | 100 | 2, 4, 8, 16, 32 (20) |
+
+The `lcm_wo_coprime_*` files have the same layout. No val pair appears in the matching train files, and pairs are unique (unordered) within a file.
+
+```bash
+for pre in lcm lcm_wo_coprime; do
+  X=""; [[ $pre == lcm_wo_coprime ]] && X=--exclude-coprime
+  V=data/lcm/${pre}_val_100.jsonl
+  python misc/gen_lcm_data.py $X --per-length 20 --seed 1 --lengths 2,4,8,16,32 --out $V
+  python misc/gen_lcm_data.py $X --n 1000 --lengths 2,4,8,16,32 --exclude $V --out data/lcm/${pre}_1000.jsonl
+  python misc/gen_lcm_data.py $X --n 1000 --lengths 2,32        --exclude $V --out data/lcm/${pre}_1000_L2-32.jsonl
+  python misc/gen_lcm_data.py $X --n 1000 --lengths 2,4,32      --exclude $V --out data/lcm/${pre}_1000_L2-4-32.jsonl
+  python misc/gen_lcm_data.py $X --n 1000 --lengths 2,4,8,32    --exclude $V --out data/lcm/${pre}_1000_L2-4-8-32.jsonl
+done
+```
+
+**Training.** Use `--task lcm` (class `LCM` in `sgs/tasks.py`). The Solver prompt comes verbatim from `misc/lcm_benchmark.py`, and the answer parser is identical to its `parse_lcm`. The gold answer is recomputed from the operands and stored as a string. With slurm, `TASK_NAME=lcm` selects the all-pairs files. For the wo_coprime variant, pass `DATASET=... VAL_DATASET=...` to `files/scripts/sgs/{grpo,sgs_onpolicy_grpo}_lcm_qwen3_4b.sbatch`.
+
+## Preorder traversal task
+
+**Task.** Given the inorder and postorder traversals of a binary tree with unique labels, output its preorder traversal.
+
+**Record format.** `{"inorder": [0, 3, 2, 1], "postorder": [3, 0, 1, 2], "preorder": [2, 0, 3, 1]}`. Labels are `0 … n-1` and shuffled. Each subtree has a random left-subtree size.
+
+**Difficulty = node count.** Node counts are 8, 16, 32, 64, 128. Qwen3-8B without thinking gets pass@5 of 19 / 0 / 0 / 0 / 0.
+
+| file | rows | nodes (rows each) |
+| --- | --- | --- |
+| `preorder_1000.jsonl` | 1000 | 8, 16, 32, 64, 128 (200) |
+| `preorder_1000_L8-128.jsonl` | 1000 | 8, 128 (500) |
+| `preorder_1000_L8-16-128.jsonl` | 1000 | 8, 16 (333), 128 (334) |
+| `preorder_1000_L8-16-32-128.jsonl` | 1000 | 8, 16, 32, 128 (250) |
+| `preorder_val_100.jsonl` | 100 | 8, 16, 32, 64, 128 (20) |
+
+No val tree appears in any train file (checked by `tests/test_preorder.py`).
+
+```bash
+G=misc/gen_preordertraversal_data.py
+python $G --per-length 20 --seed 1 --out data/preorder/preorder_val_100.jsonl
+python $G --out data/preorder/preorder_1000.jsonl
+python $G --n 1000 --lengths 8,128       --out data/preorder/preorder_1000_L8-128.jsonl
+python $G --n 1000 --lengths 8,16,128    --out data/preorder/preorder_1000_L8-16-128.jsonl
+python $G --n 1000 --lengths 8,16,32,128 --out data/preorder/preorder_1000_L8-16-32-128.jsonl
+```
+
+**Training.** Use `--task preorder` (class `Preorder` in `sgs/tasks.py`). A problem is `[inorder, postorder]`. The gold preorder is recomputed by `preorder_from`, which also rejects Conjecturer problems whose two traversals don't come from one tree. The Solver prompt and parser come verbatim from `misc/preorder_benchmark.py`. With slurm, use `TASK_NAME=preorder`.
+
+## Tests
+
+`tests/test_<task>.py` (sorting, multiplication, lcm, preorder) trace each task's pipeline offline: data files, then Solver prompt, then output parsing and verifying, then Conjecturer prompt and parsing, then Guide prompt and scores, then the verl parquet and `compute_score`. Run one with `$PYTHON tests/test_lcm.py`.
