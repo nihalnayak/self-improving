@@ -1,4 +1,4 @@
-"""SGS with an on-policy GRPO Solver, on sorting or multiplication (--task), built on verl.
+"""SGS with an on-policy GRPO Solver, on sorting, multiplication, lcm or preorder (--task), built on verl.
 
 Same as `sgs.sgs_grpo` (GRPO Solver with KL to the frozen Guide, unchanged
 REINFORCE Conjecturer, optional --all-targets) except for the Solver phase,

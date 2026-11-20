@@ -553,7 +553,7 @@ def sgs_iteration(t, args, targets, solved, solver, conj, guide, rng):
 
 def evaluate(t, targets, solver, n=5, prefix="eval", task=Sorting):
     """Solver pass@n on all targets, overall and per difficulty level (sorting: list
-    length; multiplication: operand digits; both logged as len_{L}).
+    length; multiplication, lcm: operand digits; preorder: nodes; logged as len_{L}).
     Returns (metrics, per-sample rows)."""
     _, texts = solver.generate([task.solver_messages(x) for x in targets], n=n, step=t)
     v = np.array([task.verify(texts[j], targets[j // n]) for j in range(len(texts))])

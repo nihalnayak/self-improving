@@ -16,7 +16,7 @@
 #
 # Usage (from the repo root):
 #   sbatch -A <account> -p <partition> slurm_scripts/train/sgs_onpolicy_grpo.sbatch
-# Env overrides: TASK_NAME (sorting | multiplication) MODEL NUM_ITERS (5) MINI_BATCH_SIZE (32) K (8) RESP_LEN (4096) OUT_ROOT (files/runs)
+# Env overrides: TASK_NAME (sorting | multiplication | lcm | preorder) MODEL NUM_ITERS (5) MINI_BATCH_SIZE (32) K (8) RESP_LEN (4096) OUT_ROOT (files/runs)
 # Extra CLI flags pass through to sgs.sgs_onpolicy_grpo (e.g. --all-targets).
 
 set -euo pipefail
@@ -29,7 +29,7 @@ export OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false RAY_DEDUP_LOGS=0
 export RAY_TMPDIR="/tmp/ray_${SLURM_JOB_ID:-local}"
 mkdir -p "${RAY_TMPDIR}"
 
-TASK_NAME="${TASK_NAME:-sorting}"   # sorting | multiplication (sgs/tasks.py)
+TASK_NAME="${TASK_NAME:-sorting}"   # sorting | multiplication | lcm | preorder (sgs/tasks.py)
 case "${TASK_NAME}" in
     sorting)
         CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
@@ -37,6 +37,12 @@ case "${TASK_NAME}" in
     multiplication)
         CONFIGS=(L2-10 L2-4-10 L2-4-6-10 all)
         FILES=(multiplication_1000_L2-10.jsonl multiplication_1000_L2-4-10.jsonl multiplication_1000_L2-4-6-10.jsonl multiplication_1000.jsonl) ;;
+    lcm)
+        CONFIGS=(L2-32 L2-4-32 L2-4-8-32 all)
+        FILES=(lcm_1000_L2-32.jsonl lcm_1000_L2-4-32.jsonl lcm_1000_L2-4-8-32.jsonl lcm_1000.jsonl) ;;
+    preorder)
+        CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
+        FILES=(preorder_1000_L8-128.jsonl preorder_1000_L8-16-128.jsonl preorder_1000_L8-16-32-128.jsonl preorder_1000.jsonl) ;;
     *) echo "unknown TASK_NAME=${TASK_NAME}" >&2; exit 1 ;;
 esac
 TASK="${SLURM_ARRAY_TASK_ID:-0}"

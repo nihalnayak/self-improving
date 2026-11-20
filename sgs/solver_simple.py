@@ -1,4 +1,4 @@
-"""Solver-only baselines for SGS (sorting or multiplication, --task): verl's own PPO trainer with
+"""Solver-only baselines for SGS (sorting, multiplication, lcm or preorder, --task): verl's own PPO trainer with
 adv_estimator=grpo (GRPO, default) or reinforce_plus_plus (REINFORCE++).
 
 Only the Solver is trained, on the same targets, prompt and verifier as
@@ -8,11 +8,11 @@ advantages, KL loss, validation, wandb/console logging, checkpoints) is verl's
 
     jsonl -> out_dir/data/train.parquet   one row per target, also used as val
     reward = compute_score below          1 if the task verifier accepts (sgs/tasks.py)
-    --val-dataset jsonl -> data/val.parquet  held-out targets (data_source val_<sort|mult>_len_{L})
+    --val-dataset jsonl -> data/val.parquet  held-out targets (data_source val_<sort|mult|lcm|preorder>_len_{L})
     eval/pass@5/{len_L,all}               exact pass@5 on the targets, as in sgs_simple
     val/pass@5/{len_L,all}                exact pass@5 on the val targets
     eval_samples/{step}.jsonl             every val generation (verl validation_data_dir)
-    val-core/<sort|mult>_len_{L}/acc/...         verl's own val metrics: mean@5 ~ pass@1; best@5 is a
+    val-core/<sort|mult|lcm|preorder>_len_{L}/acc/...         verl's own val metrics: mean@5 ~ pass@1; best@5 is a
                                           bootstrap (with replacement) estimate, biased low
 
 Notes:
@@ -46,7 +46,8 @@ def parse_args(argv=None):
     ap.add_argument("--task", choices=sorted(TASKS), default="sorting",
                     help="prompts, verifier and data format (sgs/tasks.py)")
     ap.add_argument("--dataset", required=True,
-                    help="jsonl of targets (sorting: `list`; multiplication: `number1`, `number2`)")
+                    help="jsonl of targets (sorting: `list`; multiplication, lcm: `number1`, `number2`; "
+                         "preorder: `inorder`, `postorder`)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--n-gpus", type=int, default=4)

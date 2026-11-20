@@ -63,7 +63,8 @@ def parse_args(argv=None):
     ap.add_argument("--task", choices=sorted(TASKS), default="sorting",
                     help="prompts, verifier and data format (sgs/tasks.py)")
     ap.add_argument("--dataset", required=True,
-                    help="jsonl of targets (sorting: `list`; multiplication: `number1`, `number2`)")
+                    help="jsonl of targets (sorting: `list`; multiplication, lcm: `number1`, `number2`; "
+                         "preorder: `inorder`, `postorder`)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--model", default="Qwen/Qwen3-4B",
                     help="init for Solver, Conjecturer and Guide (separate copies)")
@@ -245,7 +246,7 @@ def reward_and_update_conj(t, args, conjs, synth, synth_rates, conj_rollouts, co
     m.update({
         "conj/n_generated": len(conjs),
         "conj/parse_rate": len(synth) / max(1, len(conjs)),
-        # mean difficulty level: list length (sorting) / operand digits (multiplication)
+        # mean difficulty level: list length (sorting) / operand digits (mult, lcm) / nodes (preorder)
         "conj/mean_len": float(np.mean([task.level(c["problem"]) for c in synth])) if synth else 0.0,
         "synth/mean_solve_rate": float(np.mean(synth_rates)) if synth else 0.0,
         "synth/frac_s0": float((synth_rates == 0).mean()) if synth else 0.0,

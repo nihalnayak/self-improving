@@ -19,7 +19,7 @@
 # Env overrides: MODEL EPOCHS (5) TRAIN_BATCH_SIZE (32) MINI_BATCH_SIZE (32) K (8)
 #   RESP_LEN (4096) OUT_ROOT (files/runs)
 #   ADV_ESTIMATOR (grpo | reinforce_plus_plus) METHOD (run-name prefix, default grpo)
-#   TASK_NAME (sorting | multiplication, default sorting)
+#   TASK_NAME (sorting | multiplication | lcm | preorder, default sorting)
 #   DATA_DIR (train-file directory, default data/${TASK_NAME})
 # Extra args pass through to sgs.solver_simple: CLI flags or Hydra overrides
 #   (e.g. trainer.total_training_steps=3).
@@ -34,7 +34,7 @@ export OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false RAY_DEDUP_LOGS=0
 export RAY_TMPDIR="/tmp/ray_${SLURM_JOB_ID:-local}"
 mkdir -p "${RAY_TMPDIR}"
 
-TASK_NAME="${TASK_NAME:-sorting}"   # sorting | multiplication (sgs/tasks.py)
+TASK_NAME="${TASK_NAME:-sorting}"   # sorting | multiplication | lcm | preorder (sgs/tasks.py)
 case "${TASK_NAME}" in
     sorting)
         CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
@@ -42,6 +42,12 @@ case "${TASK_NAME}" in
     multiplication)
         CONFIGS=(L2-10 L2-4-10 L2-4-6-10 all)
         FILES=(multiplication_1000_L2-10.jsonl multiplication_1000_L2-4-10.jsonl multiplication_1000_L2-4-6-10.jsonl multiplication_1000.jsonl) ;;
+    lcm)
+        CONFIGS=(L2-32 L2-4-32 L2-4-8-32 all)
+        FILES=(lcm_1000_L2-32.jsonl lcm_1000_L2-4-32.jsonl lcm_1000_L2-4-8-32.jsonl lcm_1000.jsonl) ;;
+    preorder)
+        CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
+        FILES=(preorder_1000_L8-128.jsonl preorder_1000_L8-16-128.jsonl preorder_1000_L8-16-32-128.jsonl preorder_1000.jsonl) ;;
     *) echo "unknown TASK_NAME=${TASK_NAME}" >&2; exit 1 ;;
 esac
 TASK="${SLURM_ARRAY_TASK_ID:-0}"
