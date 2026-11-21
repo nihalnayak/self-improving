@@ -3,6 +3,7 @@
     $PYTHON tests/test_lcm.py
 """
 
+import glob
 import math
 import random
 import tempfile
@@ -10,7 +11,7 @@ import tempfile
 from _trace import benchmark_defs, read_jsonl, row, run, show_prompt
 
 from misc.gen_lcm_data import gen_sample
-from sgs.tasks import LCM, LCM_SOLVER_PROMPT, TASKS, parse_product
+from sgs.tasks import LCM, LCM_SOLVER_PROMPT, TASKS, Multiplication, parse_product
 
 FILES = ["lcm_val_100", "lcm_1000", "lcm_1000_L2-32", "lcm_1000_L2-4-32", "lcm_1000_L2-4-8-32"]
 WO = [f.replace("lcm_", "lcm_wo_coprime_", 1) for f in FILES]
@@ -49,7 +50,13 @@ def test_data_files():
                 assert coprime == 0
             if name != files[0]:
                 assert not pairs(name) & val, "train pair appears in val"
-    # load() ignores the jsonl `lcm` column; answers are recomputed (str for int64 safety)
+    # load() must keep every operand exact: pyarrow (load_dataset) rounds 16/32-digit ones to float64
+    assert not issubclass(LCM, Multiplication), "LCM must not inherit Multiplication.load"
+    for path in sorted(glob.glob("data/lcm/*.jsonl")):
+        rows = read_jsonl(path)
+        assert LCM.load(path) == [[r["number1"], r["number2"]] for r in rows], f"inexact load: {path}"
+    print("  LCM.load is exact on every data/lcm/*.jsonl")
+    # answers are recomputed from the operands (str for int64 safety)
     targets = LCM.load("data/lcm/lcm_1000.jsonl")
     assert targets[0] == [read_jsonl("data/lcm/lcm_1000.jsonl")[0][k] for k in ("number1", "number2")]
     big = max(targets, key=lambda p: p[0])

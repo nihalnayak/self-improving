@@ -19,6 +19,7 @@ Sorting prompts and parsers are unchanged from before this file existed (moved f
 sgs/common.py and sgs/sgs_simple.py, which re-export them).
 """
 
+import json
 import math
 import re
 
@@ -360,7 +361,10 @@ class Multiplication:
     @staticmethod
     def load(path):
         """[number1, number2] per row. The jsonl `product` column is ignored: pyarrow
-        reads products above 2**63 as float64, so it is recomputed from the operands."""
+        reads products above 2**63 as float64, so it is recomputed from the operands.
+        Exact only while operands stay below ~15 digits (pyarrow float64 above 2**63, and
+        a column with one such value is all float64); for larger operands read the jsonl
+        with the json module as LCM.load does."""
         from datasets import load_dataset
         ds = load_dataset("json", data_files=path, split="train")
         return [[int(a), int(b)] for a, b in zip(ds["number1"], ds["number2"])]
@@ -517,10 +521,28 @@ LCM_SEED_STATEMENT = ("Compute the least common multiple (LCM) of the following 
                       "number1: {number1}\nnumber2: {number2}")
 
 
-class LCM(Multiplication):
-    """Same problem format as Multiplication ([number1, number2]); inherits load
-    (the jsonl `lcm` column is ignored, recomputed), level (digits) and conjecture."""
+class LCM:
+    """[number1, number2] per problem, like Multiplication, but standalone: its loader
+    must keep operands of any size exact (see load)."""
     source = "lcm"
+
+    @staticmethod
+    def load(path):
+        """[number1, number2] per row, read with the json module, NOT load_dataset:
+        pyarrow parses integers above 2**63 (and casts any column with one) as float64,
+        which rounds 16- and 32-digit operands (e.g. ...27155284046640608 ->
+        ...25849943428956160). The `lcm` column must match the recomputed LCM."""
+        problems = []
+        with open(path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                a, b = row["number1"], row["number2"]
+                assert type(a) is int and type(b) is int, f"non-integer operands in {path}: {row}"
+                assert row.get("lcm", math.lcm(a, b)) == math.lcm(a, b), f"bad lcm in {path}: {row}"
+                problems.append([a, b])
+        return problems
 
     @staticmethod
     def solver_messages(p):
@@ -540,9 +562,26 @@ class LCM(Multiplication):
         return parse_product(text) == math.lcm(p[0], p[1])
 
     @staticmethod
+    def level(p):
+        return len(str(p[0]))
+
+    @staticmethod
     def conj_messages(p, lo, hi):
         """`lo`/`hi` are sorting's integer range; unused here."""
         return user_msg(LCM_CONJ_PROMPT.format(number1=p[0], number2=p[1]))
+
+    @staticmethod
+    def conjecture(text):
+        """(statement, [a, b]) from the last non-empty <problem> block. The problem is
+        None unless both operands parse and have at least two digits."""
+        blocks = [b.strip() for b in _PROBLEM_RE.findall(text) if b.strip()]
+        if not blocks:
+            return None, None
+        ms = [_OPERAND_RE[key].search(blocks[-1]) for key in ("number1", "number2")]
+        if not all(ms):
+            return None, None
+        p = [int(m.group(1)) for m in ms]
+        return blocks[-1], (p if min(p) >= 10 else None)
 
     @staticmethod
     def guide_messages(p, conj_statement):
