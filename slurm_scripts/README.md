@@ -12,6 +12,62 @@ slurm_scripts/
 The scripts contain no cluster-specific settings: no account, partition, paths, modules, or
 credentials. You pass those at submit time or put them in an optional `env.sh`.
 
+To run the LCM, LCM-without-coprimes and preorder experiments, do the one-time
+[setup](#first-time-setup-new-lab-member), then follow
+[Running lcm, lcm_wo_coprime and preorder](#running-lcm-lcm_wo_coprime-and-preorder).
+
+## First-time setup (new lab member)
+
+Do this once on the FASRC cluster. Everything is per user: your own clone, Python env,
+Hugging Face cache and wandb login. Runs and checkpoints go under `/n/netscratch/dam_lab/Lab/$USER/`.
+
+1. **Clone the repo and build the environment.** Follow [Installation](../README.md#installation)
+   in the top-level README (conda env with torch/vllm/verl at the pinned versions). Run every
+   command in this README **from the repo root**.
+
+2. **Write `env.sh` at the repo root.** It is gitignored, so you keep your own copy. Every script
+   here sources it at the start of the job. Template for FASRC (replace the `PYTHON` path with
+   your env):
+
+   ```bash
+   # env.sh -- sourced by every slurm script at the start of the job.
+   module purge
+   module load gcc/15.2.0-fasrc01 cuda/13.3.1-fasrc01
+   export PYTHON="${HOME}/.conda/envs/sgs/bin/python"                       # your env's python
+   export PATH="$(dirname "${PYTHON}"):${PATH}"
+   export HF_HOME="/n/netscratch/dam_lab/Lab/${USER}/.cache/huggingface"    # model downloads (large)
+   # run dirs + checkpoints (large). The ${OUT_ROOT:-...} form lets one submission override it
+   # (sbatch --export=ALL,OUT_ROOT=...) without env.sh overwriting it.
+   export OUT_ROOT="${OUT_ROOT:-/n/netscratch/dam_lab/Lab/${USER}/sgs/runs}"
+   export TOKENIZERS_PARALLELISM=false
+   ```
+
+   Check it with `source env.sh && "$PYTHON" -c "import verl, vllm, datasets; print('ok')"`.
+   netscratch is not backed up and old files are purged, so copy anything you need to keep.
+   `files/results/` is small and is a good place for it.
+
+3. **Log in to wandb** once with `wandb login`; it stores your key in `~/.netrc`. Metrics go to
+   wandb project `sgs`. To run without wandb, `export WANDB_MODE=offline` before submitting.
+
+4. **Set the Slurm account and partition** in every shell you submit from (or in `~/.bashrc`).
+   The scripts deliberately contain none:
+
+   ```bash
+   export SBATCH_ACCOUNT=kempner_dam_lab SBATCH_PARTITION=kempner_h200
+   ```
+
+   Check that you are on the account with `sacctmgr -nP show assoc user=$USER format=account`.
+
+5. **Create the log directory.** `mkdir -p files/logs`. It is gitignored, and Slurm won't create it,
+   so a job without it dies before it starts.
+
+6. **Sanity checks before launching anything big:**
+   - `sbatch --test-only slurm_scripts/train/grpo.sbatch` validates the script without submitting.
+   - `"$PYTHON" tests/test_lcm.py` and `"$PYTHON" tests/test_preorder.py` must each end with
+     `N/N passed`.
+   - On an interactive GPU node, `nvidia-smi -L` must show a full GPU. If it lists a `MIG`
+     slice, don't run vLLM or training there; use `sbatch`.
+
 ## Prerequisites
 
 1. Install the environment (see [Installation](../README.md#installation) in the top-level README) and log in to wandb once (`wandb login`). To skip wandb, `export WANDB_MODE=offline`.
@@ -128,6 +184,144 @@ sbatch -p "${CPU_PARTITION}" --dependency=afterany:$(IFS=:; echo "${EVALS[*]}") 
 - `grpo_sgs_synth.sbatch` needs finished `sgs_onpolicy_grpo.sbatch` runs first. Then run `python misc/make_sgs_synth_sorting.py`, after editing its `RUNS` path and per-config job ids, to build `files/data/sorting_sgs_onpolicy_5iters_synth/`.
 - `visualize/sgs_synth.sbatch` needs `eval/synthetic_difficulty.sbatch` to have run on the SGS runs. It only picks up 5-iteration runs (`*-5iters-*`).
 - `visualize/sort_eval.sbatch` plots whatever `eval_sort.sbatch` has written so far. Re-run it after each new eval.
+
+## Running lcm, lcm_wo_coprime and preorder
+
+These runs compare GRPO with SGS-OnPolicy-GRPO on three tasks (`sgs/tasks.py`; data described in
+[data/README.md](../data/README.md)):
+
+| experiment | task | data | level |
+| --- | --- | --- | --- |
+| `lcm` | least common multiple of two integers | `data/lcm/lcm_1000*.jsonl`, `lcm_val_100.jsonl` | operand digits: 2, 4, 8, 16, 32 |
+| `lcm_wo_coprime` | same, only pairs with GCD > 1 (its own task; inherits everything from `lcm`) | `data/lcm_wo_coprime/lcm_wo_coprime_*.jsonl` | same |
+| `preorder` | preorder traversal from inorder + postorder | `data/preorder/preorder_*.jsonl` | tree nodes: 8, 16, 32, 64, 128 |
+
+Each experiment trains 4 configs (array tasks 0-3) × 2 methods with Qwen3-4B on 4 GPUs: GRPO for
+5 epochs and SGS for 5 iterations. It then evaluates the last checkpoints and the base model on
+the config's train file plus the task's `*_val_100.jsonl` (20 problems per level).
+
+| array task | lcm / lcm_wo_coprime config | preorder config |
+| --- | --- | --- |
+| 0 | `L2-32` (digits 2, 32) | `L8-128` (nodes 8, 128) |
+| 1 | `L2-4-32` | `L8-16-128` |
+| 2 | `L2-4-8-32` | `L8-16-32-128` |
+| 3 | `all` (every level) | `all` |
+
+Do the [first-time setup](#first-time-setup-new-lab-member) first. Then, from the repo root
+with `SBATCH_ACCOUNT` / `SBATCH_PARTITION` exported, there are three steps per experiment:
+1. Submit training and evals.
+2. After SGS training: synthetic difficulty.
+3. After all evals: plots.
+
+Runtimes from 2-iteration test runs on 4 H200s:
+- SGS: about 2 h (lcm) to 3 h (preorder) per iteration, so a 5-iteration job takes 10-16 h.
+- GRPO: about 1 h per epoch.
+- One eval: under 4 h.
+
+### Step 1: submit training and evals
+
+Set `T` to the experiment and paste the block. Run it once for each of `lcm`, `lcm_wo_coprime` and
+`preorder`. Each run submits 14 jobs: 2 training arrays of 4 tasks each, plus 12 evals.
+
+```bash
+T=lcm                                    # or: T=lcm_wo_coprime, T=preorder
+RESULTS=files/results/sgs/eval_${T}_qwen3-4b_5ep
+if [[ $T == lcm* ]]; then CONFIGS=(L2-32 L2-4-32 L2-4-8-32 all); else CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all); fi
+
+G=$(sbatch --parsable --export=ALL,TASK_NAME=$T slurm_scripts/train/grpo.sbatch)
+S=$(sbatch --parsable --export=ALL,TASK_NAME=$T slurm_scripts/train/sgs_onpolicy_grpo.sbatch)
+echo "$T: GRPO array $G, SGS array $S"          # write these down: step 2 needs S
+
+for i in 0 1 2 3; do
+  c=${CONFIGS[$i]}; f=${T}_1000; [[ $c != all ]] && f+=_$c
+  D="train=data/$T/$f.jsonl val=data/$T/${T}_val_100.jsonl"
+  # eval each run's last checkpoint once its training task succeeds, and the base model now
+  sbatch -t 4:00:00 --dependency=afterok:${G}_$i \
+    --export=ALL,LABEL=grpo-$c,TRAIN_JOB=${G}_$i,RESULTS=$RESULTS,DATASETS="$D" slurm_scripts/eval/eval_sort.sbatch --task $T
+  sbatch -t 4:00:00 --dependency=afterok:${S}_$i \
+    --export=ALL,LABEL=sgs-onpolicy-grpo-reset-$c,TRAIN_JOB=${S}_$i,RESULTS=$RESULTS,DATASETS="$D" slurm_scripts/eval/eval_sort.sbatch --task $T
+  sbatch -t 4:00:00 \
+    --export=ALL,LABEL=base-$c,CKPT=Qwen/Qwen3-4B,RESULTS=$RESULTS,DATASETS="$D" slurm_scripts/eval/eval_sort.sbatch --task $T
+done
+```
+
+Check progress with `squeue -u $USER`. Logs are in `files/logs/` (`grpo-<array>_<task>.out`,
+`sgs-onpolicy-grpo-<array>_<task>.out`, `eval-sort-<job>.out`). Each eval writes
+`$RESULTS/<label>/summary.jsonl`.
+
+### Step 2: synthetic difficulty (after an SGS array finishes)
+
+This measures, for each SGS run, how hard the synthetic problems were compared with the targets
+they were generated for: mean level, and base-model pass@5 on every distinct problem. Set `T` and the
+SGS array id `S` that step 1 printed.
+
+```bash
+T=lcm                                    # or: T=lcm_wo_coprime, T=preorder
+S=<SGS array job id>
+ROOT=/n/netscratch/dam_lab/Lab/$USER/sgs/runs
+for run in "$ROOT"/sgs-onpolicy-grpo-*-${T}-*-5iters-*-j${S}_*; do
+sbatch -J synth --gres=gpu:1 --cpus-per-task=12 --mem=64G -t 4:00:00 -o files/logs/%x-%j.out <<EOF
+#!/bin/bash
+source env.sh
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+"\$PYTHON" -m analysis.synthetic_difficulty --task $T --run "$run" \
+    --out-dir files/results/sgs/synthetic_difficulty_$T/$(basename "$run")
+EOF
+done
+```
+
+### Step 3: plots (after the evals finish; CPU is enough)
+
+Run these on any node, for example an interactive session, after `source env.sh`. Re-run them
+whenever more evals land.
+
+```bash
+T=lcm                                    # or: T=lcm_wo_coprime, T=preorder
+ROOT=/n/netscratch/dam_lab/Lab/$USER/sgs/runs
+R=files/results/sgs/eval_${T}_qwen3-4b_5ep
+"$PYTHON" -m visualize.sort_curves --task $T --results-dir $R --runs-root $ROOT
+"$PYTHON" -m visualize.sort_curves --task $T --results-dir $R --runs-root $ROOT --metric pass1
+"$PYTHON" -m visualize.sort_eval   --task $T --results-dir $R
+"$PYTHON" -m visualize.pass_at_k   --task $T --sort-results-dir $R --save-png
+"$PYTHON" -m visualize.sgs_synth   --task $T --results-dir files/results/sgs/synthetic_difficulty_$T --runs-root $ROOT
+```
+
+Always pass `--task`. Without it the scripts assume sorting and put every lcm problem at "level 2"
+(the list `[a, b]` has length 2).
+
+### What you get
+
+- **`$R/sort_curves_train.png` and `sort_curves_val.png`** (the main figures). They show pass@5 per
+  epoch/iteration, with one row per train config and one column per level. GRPO (orange) vs SGS
+  (purple), with the base model as a dotted line. `sort_curves.csv` has the numbers, and
+  `sort_curves_pass1_*` shows pass@1.
+- **`$R/sort_eval.png`, `sort_eval_val_by_config.png` and `summary.csv`:** last-checkpoint pass@5
+  bars. **`pass_at_k_{train,val}.png`:** pass@k for k = 1..5.
+- **`files/results/sgs/synthetic_difficulty_$T/sgs_synth.png`:**
+  - top row: base solve rate of synthetic vs original problems per iteration
+  - bottom row: the level mix of the synthetic problems
+- **`$ROOT/<run>/`:** checkpoints, `eval_pass5.jsonl` (SGS), `eval_samples/`, `synthetic.jsonl`
+  (SGS). Everything is also in wandb project `sgs`.
+
+### Common problems
+
+- **The job log says `files/logs/...: No such file`, or no log appears.** Run `mkdir -p files/logs`.
+- **An eval sits in `PENDING (DependencyNeverSatisfied)`.** Its training task failed. Read that
+  task's log in `files/logs/`, then `scancel` the eval and resubmit both.
+- **`expected exactly one run dir ...-j<id>`.** `TRAIN_JOB` must be `<array job id>_<task>`, and the
+  eval must see the same `OUT_ROOT` as training.
+- **`sort_curves` fails with `too many values to unpack`.** A label directory in `$R` holds two
+  runs, because step 1 was submitted twice into the same results dir. Move the old `$R` away
+  before resubmitting.
+- **`sort_curves` prints `no config with all of ['grpo', 'sgs-onpolicy-grpo-reset']`.** It draws a
+  config only after both its GRPO and SGS evals exist. Wait for them.
+- **Scoring rules.** The answer is read from the first `\boxed{...}`, and `\boxed{5,312,856}` counts
+  as 5312856. A response cut off at 4096 tokens has no box and counts as wrong.
+- **lcm_wo_coprime** is its own task (`--task lcm_wo_coprime`, class `LCMWoCoprime` in
+  `sgs/tasks.py`), but it inherits everything from `lcm`: prompts, loader, verifier and levels. Only
+  its data (`data/lcm_wo_coprime/`) and its names in metrics, runs and results differ.
+- **LCM loading.** `LCM.load` reads the jsonl with Python's `json`, not `load_dataset`, because
+  pyarrow rounds 16- and 32-digit integers. Don't change that; `tests/test_lcm.py` checks it.
 
 ## Notes for AI agents
 
