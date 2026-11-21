@@ -14,6 +14,7 @@ for multiplication and LCM, [inorder, postorder] for preorder traversal. Trainer
     conjecture(text)             (statement, problem) or (None, None) if invalid
     guide_messages(p, statement) Guide chat
     source                       verl data_source stem ("sort" / "mult" / "lcm" / "preorder")
+    level_name                   (singular, plural) label of level() for plots
 
 Sorting prompts and parsers are unchanged from before this file existed (moved from
 sgs/common.py and sgs/sgs_simple.py, which re-export them).
@@ -182,6 +183,7 @@ def parse_conjecture(text):
 
 class Sorting:
     source = "sort"
+    level_name = ("Length", "Lengths")   # (singular, plural) for plot labels
 
     @staticmethod
     def load(path):
@@ -362,6 +364,7 @@ _OPERAND_RE = {key: re.compile(rf"{key}\s*:\s*([1-9][0-9]*)\b", re.IGNORECASE)
 
 class Multiplication:
     source = "mult"
+    level_name = ("Digits", "Digits")
 
     @staticmethod
     def load(path):
@@ -530,6 +533,7 @@ class LCM:
     """[number1, number2] per problem, like Multiplication, but standalone: its loader
     must keep operands of any size exact (see load)."""
     source = "lcm"
+    level_name = ("Digits", "Digits")
 
     @staticmethod
     def load(path):
@@ -762,6 +766,7 @@ def _int_list(s):
 
 class Preorder:
     source = "preorder"
+    level_name = ("Nodes", "Nodes")
 
     @staticmethod
     def load(path):

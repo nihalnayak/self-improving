@@ -1,5 +1,8 @@
 """Line plot of mean synthetic vs original-task difficulty (list length) per SGS iteration.
 
+--task (sorting default, multiplication, lcm, preorder) sets the prompt / verifier for
+the base-model pass@5 and the difficulty level (list length / operand digits / nodes).
+
 Reads `<run>/synthetic.jsonl` (one row per parsed synthetic problem:
 iter, unsolved, synthetic) and plots mean len(synthetic) and mean len(unsolved) (the original task the
 synthetic problem was generated for, in red) vs iter. Also runs base-model
@@ -15,6 +18,8 @@ Outputs (under --out-dir):
 Usage:
     python -m analysis.synthetic_difficulty \
         --run /n/netscratch/dam_lab/Lab/nnayak1/sgs/runs/<sgs run> [--model Qwen/Qwen3-4B]
+    python -m analysis.synthetic_difficulty --task lcm --run <lcm sgs run> \
+        --out-dir files/results/sgs/synthetic_difficulty_lcm/<run name>
 """
 
 import argparse
@@ -32,13 +37,22 @@ from transformers import AutoTokenizer  # noqa: E402
 from vllm import LLM  # noqa: E402
 
 from sgs import eval_sort  # noqa: E402
+from sgs.tasks import TASKS  # noqa: E402
+
+
+def key(problem):
+    """Hashable problem; nested lists (preorder) -> nested tuples, 1.0 == 1 as before."""
+    return tuple(map(key, problem)) if isinstance(problem, list) else problem
 
 
 def base_pass(lists, args, out_dir):
-    """{tuple(list): pass@n} from eval_sort.evaluate on each distinct list."""
-    ev = eval_sort.parse_args(["--checkpoints", args.model,
+    """{key(problem): pass@n} from eval_sort.evaluate on each distinct problem."""
+    ev = eval_sort.parse_args(["--checkpoints", args.model, "--task", args.task,
                                "--gpu-memory-utilization", str(args.gpu_memory_utilization)])
-    uniq = [list(x) for x in dict.fromkeys(map(tuple, lists))]
+    uniq = {}
+    for x in lists:
+        uniq.setdefault(key(x), x)
+    uniq = list(uniq.values())
     tok = AutoTokenizer.from_pretrained(args.model)
     llm = LLM(model=args.model, dtype="bfloat16", max_model_len=ev.max_model_len,
               gpu_memory_utilization=ev.gpu_memory_utilization,
@@ -47,7 +61,7 @@ def base_pass(lists, args, out_dir):
     print(f"[eval] {args.model} on {len(uniq)} distinct lists: pass@{ev.n}={m[f'pass@{ev.n}/all']:.3f}")
     with open(out_dir / "pass5_samples.jsonl", "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in rows)
-    return {tuple(r["list"]): float(any(r["correct"])) for r in rows}
+    return {key(r["list"]): float(any(r["correct"])) for r in rows}
 
 
 def lineplot(df, y, ylabel, path):
@@ -70,7 +84,9 @@ def main():
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--model", default="Qwen/Qwen3-4B", help="base model for pass@5")
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting")
     args = ap.parse_args()
+    task = TASKS[args.task]
 
     out_dir = args.out_dir or Path("files/results/sgs/synthetic_difficulty") / args.run.name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -80,15 +96,16 @@ def main():
         pd.DataFrame({"iter": ds["iter"], "source": "synthetic", "list": ds["synthetic"]}),
         pd.DataFrame({"iter": ds["iter"], "source": "original", "list": ds["unsolved"]}),
     ])
-    df["length"] = df["list"].map(len)
+    df["length"] = df["list"].map(task.level)
     passed = base_pass(df["list"], args, out_dir)
-    df["pass5"] = df["list"].map(lambda x: passed[tuple(x)])
+    df["pass5"] = df["list"].map(lambda x: passed[key(x)])
     df.groupby(["source", "iter"]).agg(count=("length", "size"), length=("length", "mean"),
                                        pass5=("pass5", "mean")).to_csv(
         out_dir / "synthetic_difficulty.csv")
 
     sns.set_theme(style="whitegrid")
-    lineplot(df, "length", "Mean list length", out_dir / "synthetic_difficulty")
+    lineplot(df, "length", "Mean list length" if args.task == "sorting"
+             else f"Mean {task.level_name[0].lower()}", out_dir / "synthetic_difficulty")
     lineplot(df, "pass5", f"Base pass@5 ({args.model.split('/')[-1]})", out_dir / "pass5")
     print(f"[plot] wrote {out_dir}")
 

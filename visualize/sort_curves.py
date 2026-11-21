@@ -8,18 +8,24 @@ reads the evals the training runs already wrote:
                                             targets); pass@5 = any correct, per length
 Base model pass@5 (dotted line) is the final-eval row of `base-<config>/summary.jsonl`.
 
+--task (sorting default, multiplication, lcm, preorder) sets the level (list length /
+operand digits / nodes) and the axis wording; labels are `<method>-<config>` with config
+`L<level>-<level>...` or `all`. GRPO val generations are assigned to train / val and to a
+level by matching their prompt against the run's own `args.json` dataset / val_dataset.
+
 --metric pass1 plots pass@1 instead (mean correctness over all samples), from the
 per-sample files: SGS <run>/eval_samples/iter_*.jsonl, GRPO <run>/eval_samples/{step}.jsonl,
 base base-<config>/<ckpt>/{train,val}_samples.jsonl. Outputs get a `_pass1` suffix.
 
 Writes to --results-dir:
-    sort_curves_{train,val}.pdf / .png   rows = train config, cols = list length,
+    sort_curves_{train,val}.pdf / .png   rows = train config, cols = level (list length),
                                          x = epoch (GRPO) / iter (SGS), y = pass@5
     sort_curves.csv                      split, config, method, epoch, length, pass
 
 Usage:
     python -m visualize.sort_curves --results-dir files/results/sgs/eval_sorting_qwen3-4b_5ep
     python -m visualize.sort_curves --results-dir files/results/sgs/eval_sorting_qwen3-4b_5ep --metric pass1
+    python -m visualize.sort_curves --task lcm --results-dir files/results/sgs/eval_lcm_qwen3-4b_5ep
 """
 
 import argparse
@@ -34,15 +40,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
-from datasets import load_dataset  # noqa: E402
+
+from sgs.tasks import TASKS  # noqa: E402
 
 FONT_SIZE = 22
-LENGTHS = ["8", "16", "32", "64", "128"]
-VAL_DATASET = "files/data/sorting/sorting_val_100.jsonl"
 # same colors as sort_eval.py's tab10 METHOD_ORDER palette
 _TAB10 = sns.color_palette("tab10", 10)
 METHODS = {"grpo": ("GRPO", _TAB10[1]), "sgs-onpolicy-grpo-reset": ("SGS-OnPolicy-GRPO", _TAB10[4])}
-LIST_RE = re.compile(r"List: (\[[^\]]*\])")
+CONFIG_RE = re.compile(r"^grpo-(L\d+(?:-\d+)*|all)$")
 
 
 def run_dir(results_dir, label, runs_root):
@@ -50,13 +55,13 @@ def run_dir(results_dir, label, runs_root):
     return runs_root / run
 
 
-def sgs_rows(run, metric="pass5"):
+def sgs_rows(run, task, metric="pass5"):
     if metric == "pass1":
         for path in sorted((run / "eval_samples").glob("iter_*.jsonl")):
             by = defaultdict(list)
             for line in path.read_text().splitlines():
                 r = json.loads(line)
-                by["train" if r["split"] == "eval" else "val", str(len(r["list"]))].append(r["correct"])
+                by["train" if r["split"] == "eval" else "val", str(task.level(r["list"]))].append(r["correct"])
             for (split, length), cs in by.items():
                 yield {"split": split, "epoch": int(path.stem.split("_")[1]), "length": length,
                        "pass": sum(cs) / len(cs)}
@@ -69,34 +74,49 @@ def sgs_rows(run, metric="pass5"):
                 yield {"split": split, "epoch": r["iter"], "length": k.split("len_")[1], "pass": v}
 
 
-def grpo_rows(run, val_lists, metric="pass5"):
-    eval_every = json.loads((run / "args.json").read_text())["eval_every"]
+def user_content(task, p):
+    return task.solver_messages(p)[0]["content"]
+
+
+def grpo_rows(run, task, metric="pass5"):
+    run_args = json.loads((run / "args.json").read_text())
+    eval_every = run_args["eval_every"]
+    # Solver prompt -> (split, level); val wins if a problem is in both files
+    split_of = {user_content(task, p): ("train", str(task.level(p))) for p in task.load(run_args["dataset"])}
+    split_of.update({user_content(task, p): ("val", str(task.level(p))) for p in task.load(run_args["val_dataset"])})
     for path in (run / "eval_samples").glob("*.jsonl"):
         if not path.stem.isdigit():
             continue
-        correct = defaultdict(list)  # list -> correctness of each of its samples
+        correct = defaultdict(list)  # prompt -> correctness of each of its samples
         for line in path.read_text().splitlines():
             r = json.loads(line)
-            xs = tuple(json.loads(LIST_RE.search(r["input"]).group(1)))
-            correct[xs].append(r["acc"] > 0.5)
+            # verl decodes the chat prompt as "user\n<content>\nassistant\n..."
+            content = r["input"].removeprefix("user\n").split("\nassistant\n")[0]
+            correct[content].append(r["acc"] > 0.5)
         by = defaultdict(list)
-        for xs, c in correct.items():
+        for content, c in correct.items():
             # pass@5: any sample correct; pass@1: every sample counts
-            by["val" if xs in val_lists else "train", str(len(xs))] += c if metric == "pass1" else [any(c)]
+            by[split_of[content]] += c if metric == "pass1" else [any(c)]
         for (split, length), cs in by.items():
             yield {"split": split, "epoch": int(path.stem) / eval_every, "length": length,
                    "pass": sum(cs) / len(cs)}
 
 
-def base_pass(results_dir, config, metric="pass5"):
+def base_pass(results_dir, config, task, metric="pass5"):
+    """{(split, level): pass} of base-<config>; {} until that eval has finished."""
     out = {}
+    if not (results_dir / f"base-{config}" / "summary.jsonl").exists():
+        return out
     if metric == "pass1":
         for split in ("train", "val"):
-            (path,) = (results_dir / f"base-{config}").glob(f"*/{split}_samples.jsonl")
+            paths = list((results_dir / f"base-{config}").glob(f"*/{split}_samples.jsonl"))
+            if not paths:  # this split not evaluated yet
+                continue
+            (path,) = paths
             by = defaultdict(list)
             for line in path.read_text().splitlines():
                 r = json.loads(line)
-                by[str(len(r["list"]))] += r["correct"]
+                by[str(task.level(r["list"]))] += r["correct"]
             for length, cs in by.items():
                 out[split, length] = sum(cs) / len(cs)
         return out
@@ -113,20 +133,26 @@ def main():
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--runs-root", type=Path, default=Path("/n/netscratch/dam_lab/Lab/nnayak1/sgs/runs"))
     ap.add_argument("--metric", choices=("pass5", "pass1"), default="pass5")
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting")
     args = ap.parse_args()
+    task = TASKS[args.task]
+    level_one, level_many = task.level_name
     suffix = "" if args.metric == "pass5" else f"_{args.metric}"
     ylabel = "Pass@5" if args.metric == "pass5" else "Pass@1"
 
-    val_lists = {tuple(r["list"]) for r in load_dataset("json", data_files=VAL_DATASET, split="train")}
     labels = {p.name for p in args.results_dir.iterdir() if p.is_dir()}
-    configs = [c for c in ("L8-128", "L8-16-128", "L8-16-32-128", "all")
-               if all(f"{m}-{c}" in labels for m in METHODS)]
+    configs = sorted({m[1] for m in map(CONFIG_RE.match, labels) if m
+                      and all(f"{meth}-{m[1]}" in labels for meth in METHODS)},
+                     key=lambda c: (c == "all", len(c.split("-")), c))
+    if not configs:
+        print(f"[plot] no config with all of {list(METHODS)} under {args.results_dir}")
+        return
 
     rows = []
     for config in configs:
         for m, (name, _) in METHODS.items():
             run = run_dir(args.results_dir, f"{m}-{config}", args.runs_root)
-            it = sgs_rows(run, args.metric) if m.startswith("sgs") else grpo_rows(run, val_lists, args.metric)
+            it = sgs_rows(run, task, args.metric) if m.startswith("sgs") else grpo_rows(run, task, args.metric)
             rows += [{"config": config, "method": name, **r} for r in it]
     df = pd.DataFrame(rows).sort_values(["split", "config", "method", "length", "epoch"])
     df.to_csv(args.results_dir / f"sort_curves{suffix}.csv", index=False)
@@ -135,13 +161,15 @@ def main():
                                          "axes.labelsize": FONT_SIZE, "legend.fontsize": FONT_SIZE,
                                          "xtick.labelsize": FONT_SIZE - 4, "ytick.labelsize": FONT_SIZE - 4})
     palette = {name: color for name, color in METHODS.values()}
+    lengths = sorted(set(df["length"]), key=int)
+    epochs = range(int(df["epoch"].max()) + 1)
     for split in ("train", "val"):
-        fig, axes = plt.subplots(len(configs), len(LENGTHS), figsize=(4.5 * len(LENGTHS), 4 * len(configs)),
+        fig, axes = plt.subplots(len(configs), len(lengths), figsize=(4.5 * len(lengths), 4 * len(configs)),
                                  sharex=True, sharey=True, squeeze=False)
         titled = set()  # column title on the first non-empty panel (train skips lengths)
         for i, config in enumerate(configs):
-            base = base_pass(args.results_dir, config, args.metric)
-            for j, length in enumerate(LENGTHS):
+            base = base_pass(args.results_dir, config, task, args.metric)
+            for j, length in enumerate(lengths):
                 ax = axes[i][j]
                 d = df[(df["split"] == split) & (df["config"] == config) & (df["length"] == length)]
                 if d.empty:  # length not in this train config
@@ -149,18 +177,19 @@ def main():
                     continue
                 sns.lineplot(data=d, x="epoch", y="pass", hue="method", palette=palette,
                              marker="o", markersize=10, linewidth=2.5, ax=ax, legend=False)
-                ax.axhline(base[split, length], ls=":", color="gray", lw=2)
+                if (split, length) in base:
+                    ax.axhline(base[split, length], ls=":", color="gray", lw=2)
                 ax.set_ylim(-0.03, 1.03)
-                ax.set_xticks(range(6))
+                ax.set_xticks(epochs)
                 if length not in titled:
-                    ax.set_title(f"Length {length}")
+                    ax.set_title(f"{level_one} {length}")
                     titled.add(length)
                 ax.set_xlabel("Epoch / Iteration" if i == len(configs) - 1 else "")
                 ax.set_ylabel(f"{split.capitalize()} {ylabel}" if j == 0 else "")
                 ax.tick_params(labelbottom=True, labelleft=True)
             # row label left of the Pass@5 axis label: the lengths this row trained on
-            train_lengths = LENGTHS if config == "all" else config[1:].split("-")
-            axes[i][0].annotate("Train Lengths\n" + ", ".join(train_lengths), xy=(-0.42, 0.5),
+            train_lengths = lengths if config == "all" else config[1:].split("-")
+            axes[i][0].annotate(f"Train {level_many}\n" + ", ".join(train_lengths), xy=(-0.42, 0.5),
                                 xycoords="axes fraction", rotation=90, ha="right", va="center", multialignment="center",
                                 fontsize=FONT_SIZE)
         handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n) for n, c in METHODS.values()]

@@ -11,8 +11,13 @@ synthetic list, unsolved original target) with the base-model
                                   length (log-scale color, shared colorbar)
     sgs_synth.csv          config, source, iter, length, solve_rate (one row per list)
 
+--task (sorting default, multiplication, lcm, preorder) sets the level (list length /
+operand digits / nodes) and its wording; --iters picks the `*-<iters>iters-*` runs
+(default 5); --runs-root is where the training runs (synthetic.jsonl) live.
+
 Usage:
     python -m visualize.sgs_synth --results-dir files/results/sgs/synthetic_difficulty
+    python -m visualize.sgs_synth --task lcm --results-dir files/results/sgs/synthetic_difficulty_lcm
 """
 
 import argparse
@@ -30,24 +35,31 @@ import seaborn as sns  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from matplotlib.colors import LogNorm  # noqa: E402
 
+from sgs.tasks import TASKS  # noqa: E402
+
 FONT_SIZE = 16
 RUNS = Path("/n/netscratch/dam_lab/Lab/nnayak1/sgs/runs")
-RUN_RE = re.compile(r"-sorting-(?P<config>L\d+(?:-\d+)*|all)-5iters-")
 
 
-def load(results_dir):
+def key(problem):
+    """Hashable problem; nested lists (preorder) -> nested tuples, 1.0 == 1 as before."""
+    return tuple(map(key, problem)) if isinstance(problem, list) else problem
+
+
+def load(results_dir, task, iters=5, runs_root=RUNS):
+    run_re = re.compile(rf"-(?P<config>L\d+(?:-\d+)*|all)-{iters}iters-")
     rows = []
-    for run_dir in sorted(results_dir.glob("*-5iters-*")):
-        config = RUN_RE.search(run_dir.name)["config"]
+    for run_dir in sorted(results_dir.glob(f"*-{iters}iters-*")):
+        config = run_re.search(run_dir.name)["config"]
         rate = {}
         for line in (run_dir / "pass5_samples.jsonl").read_text().splitlines():
             r = json.loads(line)
-            rate[tuple(r["list"])] = float(np.mean(r["correct"]))
-        ds = load_dataset("json", data_files=str(RUNS / run_dir.name / "synthetic.jsonl"),
+            rate[key(r["list"])] = float(np.mean(r["correct"]))
+        ds = load_dataset("json", data_files=str(runs_root / run_dir.name / "synthetic.jsonl"),
                           split="train")
         for source, col in (("synthetic", "synthetic"), ("original", "unsolved")):
-            rows += [{"config": config, "source": source, "iter": it, "length": len(xs),
-                      "solve_rate": rate[tuple(xs)]} for it, xs in zip(ds["iter"], ds[col])]
+            rows += [{"config": config, "source": source, "iter": it, "length": task.level(xs),
+                      "solve_rate": rate[key(xs)]} for it, xs in zip(ds["iter"], ds[col])]
     return pd.DataFrame(rows)
 
 
@@ -56,11 +68,16 @@ def main():
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--model", default="Qwen/Qwen3-4B",
                     help="base model behind pass5_samples.jsonl (axis label only)")
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting")
+    ap.add_argument("--iters", type=int, default=5, help="only runs named *-<iters>iters-*")
+    ap.add_argument("--runs-root", type=Path, default=RUNS, help="training run dirs")
     args = ap.parse_args()
+    task = TASKS[args.task]
+    level_one, level_many = task.level_name
 
-    df = load(args.results_dir)
+    df = load(args.results_dir, task, args.iters, args.runs_root)
     if df.empty:
-        print(f"[plot] no 5-iter runs under {args.results_dir}")
+        print(f"[plot] no {args.iters}-iter runs under {args.results_dir}")
         return
     df.to_csv(args.results_dir / "sgs_synth.csv", index=False)
 
@@ -80,8 +97,8 @@ def main():
                      hue_order=["synthetic", "original"], marker="o", markersize=10, linewidth=2.5, errorbar=None, ax=ax,
                      palette={"synthetic": "tab:blue", "original": "tab:red"})
         ax.set_xticks(iters)
-        ax.set_title("train: all lengths" if config == "all"
-                     else "train: lengths " + ", ".join(config[1:].split("-")))
+        ax.set_title(f"train: all {level_many.lower()}" if config == "all"
+                     else f"train: {level_many.lower()} " + ", ".join(config[1:].split("-")))
         ax.set_xlabel("")
         ax.set_ylabel(f"Base Solve Rate ({args.model.split('/')[-1]})" if j == 0 else "")
         ax.set_ylim(0, 1)
@@ -108,7 +125,7 @@ def main():
     pos = axes[1][-1].get_position()
     cax = fig.add_axes((0.95, pos.y0, 0.012, pos.height))
     cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax)
-    cbar.set_label("List Length")
+    cbar.set_label("List Length" if args.task == "sorting" else level_one)
     for ext in ("pdf", "png"):
         fig.savefig(args.results_dir / f"sgs_synth.{ext}", dpi=300, bbox_inches="tight")
     plt.close(fig)

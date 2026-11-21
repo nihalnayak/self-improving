@@ -1,5 +1,8 @@
 """Bar plot of sorting pass@n per list length for each evaluated method.
 
+--task (sorting default, multiplication, lcm, preorder) only changes the axis / title
+wording (list length / digits / nodes); summary.jsonl is the same for every task.
+
 Reads `<results-dir>/<label>/summary.jsonl` written by `sgs.eval_sort` (one
 subdir per method, e.g. sgs-mbs32, grpo, base), keeps the last row per
 (label, split) so re-evals overwrite, and writes to <results-dir>:
@@ -12,6 +15,7 @@ subdir per method, e.g. sgs-mbs32, grpo, base), keeps the last row per
 
 Usage:
     python -m visualize.sort_eval --results-dir files/results/sgs/eval_sorting_qwen3-1.7b_10ep
+    python -m visualize.sort_eval --task preorder --results-dir files/results/sgs/eval_preorder_qwen3-4b_5ep
 """
 
 import argparse
@@ -25,6 +29,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
+
+from sgs.tasks import TASKS  # noqa: E402
 
 FONT_SIZE = 16
 # OPSD's teacher sees the gold sorted list: not a fair comparison, so not plotted.
@@ -68,7 +74,10 @@ def load(results_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--results-dir", type=Path, required=True)
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting")
     args = ap.parse_args()
+    level_one, level_many = TASKS[args.task].level_name
+    xlabel = "List Length" if args.task == "sorting" else level_one
 
     df = load(args.results_dir)
     if df.empty:
@@ -90,7 +99,7 @@ def main():
         sns.barplot(data=df[df["split"] == split], x="length", y="pass", hue="label",
                     order=lengths, hue_order=labels, palette="Set2", ax=ax)
         ax.set_title(f"{split} targets")
-        ax.set_xlabel("list length")
+        ax.set_xlabel(xlabel.lower())
         ax.set_ylabel(metric)
         ax.set_ylim(0, 1)
         ax.get_legend().remove()
@@ -122,11 +131,11 @@ def main():
     for ax, config in zip(axes[0], configs):
         sns.barplot(data=val[val["config"] == config], x="length", y="pass", hue="method",
                     order=lengths, hue_order=methods, palette=palette, ax=ax)
-        ax.set_title("train: all lengths" if config == "all"
-                     else "train: lengths " + ", ".join(config[1:].split("-")))
+        ax.set_title(f"train: all {level_many.lower()}" if config == "all"
+                     else f"train: {level_many.lower()} " + ", ".join(config[1:].split("-")))
         ax.set_xticks(range(len(lengths)), [x.capitalize() for x in lengths])
         ax.tick_params(axis="x", labelsize=FONT_SIZE)
-        ax.set_xlabel("List Length", fontsize=FONT_SIZE + 2)
+        ax.set_xlabel(xlabel, fontsize=FONT_SIZE + 2)
         ax.set_ylabel(f"val {metric}")
         ax.set_ylim(0, 1)
         ax.get_legend().remove()
