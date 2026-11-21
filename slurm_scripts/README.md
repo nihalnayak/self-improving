@@ -68,32 +68,7 @@ Hugging Face cache and wandb login. Runs and checkpoints go under `/n/netscratch
    - On an interactive GPU node, `nvidia-smi -L` must show a full GPU. If it lists a `MIG`
      slice, don't run vLLM or training there; use `sbatch`.
 
-## Prerequisites
-
-1. Install the environment (see [Installation](../README.md#installation) in the top-level README) and log in to wandb once (`wandb login`). To skip wandb, `export WANDB_MODE=offline`.
-2. **Submit every script from the repo root.** Scripts `cd "$SLURM_SUBMIT_DIR"` and use repo-relative paths.
-3. `mkdir -p files/logs`. Slurm writes `files/logs/<job-name>-<jobid>[_<task>].out` there and will not create the directory itself.
-4. The sorting data must exist in `data/sorting/` (see [Data](../README.md#data)).
-5. Optional: `env.sh` at the repo root (gitignored). If present, every script `source`s it first. Use it for anything site-specific:
-
-   ```bash
-   # env.sh (example)
-   module load gcc/<version> cuda/<version>
-   export PYTHON=/path/to/env/bin/python        # default: python on PATH
-   export HF_HOME=/path/to/large/disk/huggingface
-   export OUT_ROOT=/path/to/large/disk/sgs/runs # default: files/runs (checkpoints are large)
-   ```
-
 ## Submitting
-
-Account and partition always come from the command line or the environment:
-
-```bash
-sbatch -A <account> -p <partition> slurm_scripts/train/sgs_onpolicy_grpo.sbatch
-# or once per shell:
-export SBATCH_ACCOUNT=<account> SBATCH_PARTITION=<partition>
-sbatch slurm_scripts/train/sgs_onpolicy_grpo.sbatch
-```
 
 Here is how to change what runs:
 
@@ -326,10 +301,8 @@ Always pass `--task`. Without it the scripts assume sorting and put every lcm pr
 ## Notes for AI agents
 
 - Do not write `--account` / `--partition` or absolute paths into these scripts. Pass them at submit time, or put them in `env.sh`.
-- Always run `sbatch` from the repo root. Check a script with `sbatch --test-only -A <acct> -p <part> <script>` before submitting.
 - Monitor jobs with `squeue -u $USER` and `sacct -j <jobid> --format=JobID,State,Elapsed,MaxRSS`. Logs are in `files/logs/`.
 - To debug on an interactive GPU node, run the train script directly (`bash slurm_scripts/train/<x>.sbatch`); with no `SLURM_ARRAY_TASK_ID` it runs task 0. Or call the module yourself with `python -m sgs.<module> --help`.
 - Common failures:
   - **Ray `AF_UNIX path length` errors.** The scripts already set `RAY_TMPDIR=/tmp/ray_$SLURM_JOB_ID`; keep it on node-local disk.
   - **vLLM OOM / KV-cache errors.** Lower `--gpu-memory-utilization` (default 0.6) or `RESP_LEN`, or give the job more GPUs (keep `--n-gpus` in sync with `--gres`).
-  - **`expected exactly one run dir ...-j<id>`** from eval. The `TRAIN_JOB` must be `<array job id>_<task>`, and `OUT_ROOT` must match the one used for training.
