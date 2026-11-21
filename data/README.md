@@ -78,6 +78,16 @@ Return only the sorted list on a single line, enclosed in \boxed{}, e.g. \boxed{
 | `sorting_1000_L8-16-32-128.jsonl` | 1000 | 8, 16, 32, 128 (250) | train config `L8-16-32-128` (task 2) |
 | `sorting_val_100.jsonl` | 100 | 8, 16, 32, 64, 128 (20) | held-out validation for every run |
 
+The `sorting_1500*.jsonl` and `sorting_2000*.jsonl` files repeat these four
+training configurations with 1,500 and 2,000 total examples. Generate each
+with `misc/gen_sort_data.py --seed 0 --n <size> --lengths <lengths> --out <path>`.
+Counts are balanced across lengths; the 2,000-example three-length config has
+666/667/667 rows at lengths 8/16/128. These are fresh generator outputs;
+training-file overlap is allowed, and validation remains `sorting_val_100.jsonl`.
+Run the five-epoch Qwen3-4B GRPO experiments and dependent evaluation/plots with
+`bash files/scripts/sgs/run_grpo_scaled_sorting_qwen3_4b.sh`.
+At batch size 32 (drop last), these use 46/62 steps per epoch, or 230/310 total.
+
 - Rows are grouped by length in ascending order. Row order carries no meaning.
 - No validation list appears in any train file.
 - The train subsets leave out some lengths (e.g. 32 and 64). Validation always covers every length, so it also measures generalization to lengths that were not trained on.
