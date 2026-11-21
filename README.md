@@ -142,7 +142,7 @@ sbatch -A <account> -p <cpu-partition> slurm_scripts/visualize/sort_eval.sbatch
 - Results go to `files/results/sgs/eval_sorting_qwen3-4b_5ep/<label>/`, and figures are written to the same directory.
 - For SGS runs, `eval/synthetic_difficulty.sbatch` followed by `visualize/sgs_synth.sbatch` analyzes how hard the synthetic problems are across iterations.
 
-See [`slurm_scripts/README.md`](slurm_scripts/README.md) for the full script reference, the train → eval → plot dependency chain, and troubleshooting.
+See [`slurm_scripts/README.md`](slurm_scripts/README.md) for setup and how to run train → eval → plot.
 
 ## Legacy: SOAR
 
