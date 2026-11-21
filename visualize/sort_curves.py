@@ -6,6 +6,8 @@ reads the evals the training runs already wrote:
     SGS:  <run>/eval_pass5.jsonl            per iter; eval/ = train targets, val/ = val
     GRPO: <run>/eval_samples/{step}.jsonl   verl val generations (5 per list, train + val
                                             targets); pass@5 = any correct, per length
+Optional grpo-1.5x-<config> and grpo-2x-<config> labels add scaled-data GRPO curves.
+Each GRPO run uses its own training dataset for train curves and its own steps per epoch.
 Base model pass@5 (dotted line) is the final-eval row of `base-<config>/summary.jsonl`.
 
 --task (sorting default, multiplication, lcm, preorder) sets the level (list length /
@@ -46,8 +48,14 @@ from sgs.tasks import TASKS  # noqa: E402
 FONT_SIZE = 22
 # same colors as sort_eval.py's tab10 METHOD_ORDER palette
 _TAB10 = sns.color_palette("tab10", 10)
-METHODS = {"grpo": ("GRPO", _TAB10[1]), "sgs-onpolicy-grpo-reset": ("SGS-OnPolicy-GRPO", _TAB10[4])}
-CONFIG_RE = re.compile(r"^grpo-(L\d+(?:-\d+)*|all)$")
+METHODS = {"grpo": ("GRPO", _TAB10[1]), "sgs-onpolicy-grpo-reset": ("SGS-OnPolicy-GRPO", _TAB10[4]),
+           "grpo-1.5x": ("GRPO (1.5×)", _TAB10[2]), "grpo-2x": ("GRPO (2×)", _TAB10[3])}
+CONFIG_RE = re.compile(r"^grpo-(?:1\.5x-|2x-)?(L\d+(?:-\d+)*|all)$")
+
+
+def available_configs(labels):
+    return sorted({m[1] for m in map(CONFIG_RE.match, labels) if m},
+                  key=lambda c: (c == "all", len(c.split("-")), c))
 
 
 def run_dir(results_dir, label, runs_root):
@@ -80,9 +88,10 @@ def user_content(task, p):
 
 def grpo_rows(run, task, metric="pass5"):
     run_args = json.loads((run / "args.json").read_text())
-    eval_every = run_args["eval_every"]
+    targets = task.load(run_args["dataset"])
+    steps_per_epoch = len(targets) // run_args["train_batch_size"]
     # Solver prompt -> (split, level); val wins if a problem is in both files
-    split_of = {user_content(task, p): ("train", str(task.level(p))) for p in task.load(run_args["dataset"])}
+    split_of = {user_content(task, p): ("train", str(task.level(p))) for p in targets}
     split_of.update({user_content(task, p): ("val", str(task.level(p))) for p in task.load(run_args["val_dataset"])})
     for path in (run / "eval_samples").glob("*.jsonl"):
         if not path.stem.isdigit():
@@ -98,7 +107,7 @@ def grpo_rows(run, task, metric="pass5"):
             # pass@5: any sample correct; pass@1: every sample counts
             by[split_of[content]] += c if metric == "pass1" else [any(c)]
         for (split, length), cs in by.items():
-            yield {"split": split, "epoch": int(path.stem) / eval_every, "length": length,
+            yield {"split": split, "epoch": int(path.stem) / steps_per_epoch, "length": length,
                    "pass": sum(cs) / len(cs)}
 
 
@@ -141,16 +150,16 @@ def main():
     ylabel = "Pass@5" if args.metric == "pass5" else "Pass@1"
 
     labels = {p.name for p in args.results_dir.iterdir() if p.is_dir()}
-    configs = sorted({m[1] for m in map(CONFIG_RE.match, labels) if m
-                      and all(f"{meth}-{m[1]}" in labels for meth in METHODS)},
-                     key=lambda c: (c == "all", len(c.split("-")), c))
+    configs = available_configs(labels)
     if not configs:
-        print(f"[plot] no config with all of {list(METHODS)} under {args.results_dir}")
+        print(f"[plot] no GRPO configs under {args.results_dir}")
         return
 
     rows = []
     for config in configs:
         for m, (name, _) in METHODS.items():
+            if f"{m}-{config}" not in labels:
+                continue
             run = run_dir(args.results_dir, f"{m}-{config}", args.runs_root)
             it = sgs_rows(run, task, args.metric) if m.startswith("sgs") else grpo_rows(run, task, args.metric)
             rows += [{"config": config, "method": name, **r} for r in it]
@@ -192,7 +201,8 @@ def main():
             axes[i][0].annotate(f"Train {level_many}\n" + ", ".join(train_lengths), xy=(-0.42, 0.5),
                                 xycoords="axes fraction", rotation=90, ha="right", va="center", multialignment="center",
                                 fontsize=FONT_SIZE)
-        handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n) for n, c in METHODS.values()]
+        handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n)
+                   for n, c in METHODS.values() if n in set(df["method"])]
         handles.append(plt.Line2D([], [], color="gray", ls=":", lw=2.5, label="Base"))
         fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
                    bbox_to_anchor=(0.5, 1.0))
