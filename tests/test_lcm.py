@@ -3,6 +3,7 @@
     $PYTHON tests/test_lcm.py
 """
 
+import filecmp
 import glob
 import math
 import random
@@ -56,6 +57,15 @@ def test_data_files():
         rows = read_jsonl(path)
         assert LCM.load(path) == [[r["number1"], r["number2"]] for r in rows], f"inexact load: {path}"
     print("  LCM.load is exact on every data/lcm/*.jsonl")
+    # lcm_wo_coprime: its own task, inheriting everything from LCM, on copies of the data/lcm files
+    wo_task = TASKS["lcm_wo_coprime"]
+    assert issubclass(wo_task, LCM) and wo_task.source == "lcm_wo_coprime"
+    copies = sorted(glob.glob("data/lcm_wo_coprime/*.jsonl"))
+    assert [p.split("/")[-1] for p in copies] == [f"{n}.jsonl" for n in sorted(WO)], copies
+    for path in copies:
+        assert filecmp.cmp(path, f"data/lcm/{path.split('/')[-1]}", shallow=False), f"copy differs: {path}"
+        assert wo_task.load(path) == [[r["number1"], r["number2"]] for r in read_jsonl(path)]
+    print(f"  data/lcm_wo_coprime/: {len(copies)} files identical to data/lcm/, exact load")
     # answers are recomputed from the operands (str for int64 safety)
     targets = LCM.load("data/lcm/lcm_1000.jsonl")
     assert targets[0] == [read_jsonl("data/lcm/lcm_1000.jsonl")[0][k] for k in ("number1", "number2")]
@@ -157,6 +167,17 @@ def test_verl_path():
         assert score == want
     assert compute_score(r.data_source, f"\\boxed{{{r.reward_model['ground_truth']}}}",
                          r.reward_model["ground_truth"]) == 1.0
+    # lcm_wo_coprime: own data_source stem, routed back to its task by compute_score
+    wo = TASKS["lcm_wo_coprime"]
+    wo_targets = wo.load("data/lcm_wo_coprime/lcm_wo_coprime_val_100.jsonl")
+    with tempfile.TemporaryDirectory() as d:
+        write_parquet(wo_targets, f"{d}/val.parquet", wo, source_prefix="val_")
+        w = pd.read_parquet(f"{d}/val.parquet").iloc[-1]
+    print(f"  data_source={w.data_source} ground_truth={w.reward_model['ground_truth']!r}")
+    assert w.data_source == "val_lcm_wo_coprime_len_32"
+    gt = w.reward_model["ground_truth"]
+    assert compute_score(w.data_source, f"\\boxed{{{gt}}}", gt) == 1.0
+    assert compute_score(w.data_source, f"\\boxed{{{int(gt) + 1}}}", gt) == 0.0
 
 
 if __name__ == "__main__":

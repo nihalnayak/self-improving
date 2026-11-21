@@ -46,10 +46,13 @@ DATASETS = {
     "multiplication": ["train=data/multiplication/multiplication_1000.jsonl",
                        "val=data/multiplication/multiplication_val_100.jsonl"],
     "lcm": ["train=data/lcm/lcm_1000.jsonl", "val=data/lcm/lcm_val_100.jsonl"],
+    "lcm_wo_coprime": ["train=data/lcm_wo_coprime/lcm_wo_coprime_1000.jsonl",
+                       "val=data/lcm_wo_coprime/lcm_wo_coprime_val_100.jsonl"],
     "preorder": ["train=data/preorder/preorder_1000.jsonl", "val=data/preorder/preorder_val_100.jsonl"],
 }
 # parsed answer stored per sample (correctness comes from task.verify)
 PARSE = {"sorting": parse_sorted, "multiplication": parse_product, "lcm": parse_product,
+         "lcm_wo_coprime": parse_product,
          "preorder": parse_preorder}
 
 

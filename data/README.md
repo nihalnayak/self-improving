@@ -22,7 +22,13 @@ data/
     lcm_1000_L2-4-32.jsonl           train, digits 2, 4, 32
     lcm_1000_L2-4-8-32.jsonl         train, digits 2, 4, 8, 32
     lcm_val_100.jsonl                validation, all digit counts
-    lcm_wo_coprime_*.jsonl           same six files, only pairs with GCD > 1
+    lcm_wo_coprime_*.jsonl           same five files, only pairs with GCD > 1
+  lcm_wo_coprime/                    copies of data/lcm/lcm_wo_coprime_*.jsonl for --task lcm_wo_coprime
+    lcm_wo_coprime_1000.jsonl        (identical files; tests/test_lcm.py checks they match)
+    lcm_wo_coprime_1000_L2-32.jsonl
+    lcm_wo_coprime_1000_L2-4-32.jsonl
+    lcm_wo_coprime_1000_L2-4-8-32.jsonl
+    lcm_wo_coprime_val_100.jsonl
   preorder/
     preorder_1000.jsonl              train, all node counts
     preorder_1000_L8-128.jsonl       train, nodes 8, 128
@@ -145,7 +151,7 @@ python misc/gen_multiplication_data.py --n 1000 --lengths 2,4,6,10   --exclude $
 
 **Difficulty = operand digit count.** Digit counts are 2, 4, 8, 16, 32. These are the levels of the Qwen3-8B difficulty run (`files/results/qwen3_8b_difficulty/lcm.no-thinking.log`: pass@5 99 / 18 / 0 / 0 / 0), capped at 32.
 
-**Two variants.** `lcm_*` uses uniform random pairs, and about 60% of them are coprime (GCD 1). For those pairs the LCM is just the product, so the task reduces to multiplication. `lcm_wo_coprime_*` resamples coprime pairs (`--exclude-coprime`), so every pair has GCD > 1. Each variant has its own val split, and both use the same task (`--task lcm`).
+**Two variants.** `lcm_*` uses uniform random pairs, and about 60% of them are coprime (GCD 1). For those pairs the LCM is just the product, so the task reduces to multiplication. `lcm_wo_coprime_*` resamples coprime pairs (`--exclude-coprime`), so every pair has GCD > 1. Each variant has its own val split. `lcm_*` trains with `--task lcm` on `data/lcm/`. `lcm_wo_coprime_*` trains with `--task lcm_wo_coprime` on `data/lcm_wo_coprime/`; that task inherits everything from `lcm` (prompts, loader, verifier, levels).
 
 | file | rows | digits (rows each) |
 | --- | --- | --- |

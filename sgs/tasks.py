@@ -13,7 +13,7 @@ for multiplication and LCM, [inorder, postorder] for preorder traversal. Trainer
     conj_messages(p, lo, hi)     Conjecturer chat
     conjecture(text)             (statement, problem) or (None, None) if invalid
     guide_messages(p, statement) Guide chat
-    source                       verl data_source stem ("sort" / "mult" / "lcm" / "preorder")
+    source                       verl data_source stem ("sort" / "mult" / "lcm" / "lcm_wo_coprime" / "preorder")
     level_name                   (singular, plural) label of level() for plots
 
 Sorting prompts and parsers are unchanged from before this file existed (moved from
@@ -598,6 +598,12 @@ class LCM:
         return user_msg(LCM_GUIDE_PROMPT.format(seed=seed, conjecture=conj_statement))
 
 
+class LCMWoCoprime(LCM):
+    """LCM restricted to pairs with GCD > 1 (data/lcm_wo_coprime/). Everything is inherited
+    from LCM: prompts, exact json loader, verifier, level, conjecture and Guide."""
+    source = "lcm_wo_coprime"
+
+
 # =============================================================================
 # Preorder traversal
 # =============================================================================
@@ -824,5 +830,6 @@ class Preorder:
         return user_msg(PREORDER_GUIDE_PROMPT.format(seed=seed, conjecture=conj_statement))
 
 
-TASKS = {"sorting": Sorting, "multiplication": Multiplication, "lcm": LCM, "preorder": Preorder}
+TASKS = {"sorting": Sorting, "multiplication": Multiplication, "lcm": LCM,
+         "lcm_wo_coprime": LCMWoCoprime, "preorder": Preorder}
 TASK_BY_SOURCE = {t.source: t for t in TASKS.values()}
