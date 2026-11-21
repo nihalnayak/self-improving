@@ -54,7 +54,12 @@ OUTPUTS = [
     ("wrong", "\\boxed{418}", 418),
     ("commas inside box", "\\boxed{4,08}", None),
     ("empty", "", None),
+    # thousands separators: accepted by parse_product, rejected by the benchmark parser
+    ("thousands separators", "\\boxed{5,312,856}", 5312856),
+    ("bad comma grouping", "\\boxed{5,31,2856}", None),
 ]
+# labels where parse_product intentionally differs from misc/multiplication_benchmark.py
+DIVERGES = {"thousands separators"}
 
 
 def test_solver_parsing():
@@ -63,7 +68,8 @@ def test_solver_parsing():
     for label, out, want in OUTPUTS:
         got, ok = parse_product(out), Multiplication.verify(out, P)
         row(label, out, got, ok)
-        assert got == want == bench_parse(out)
+        assert got == want
+        assert (got == bench_parse(out)) != (label in DIVERGES), "only DIVERGES may differ from the benchmark"
         assert ok == (want == 408) == Multiplication.check(out, Multiplication.answer(P))
 
 

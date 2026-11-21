@@ -228,13 +228,16 @@ MULT_SOLVER_PROMPT = (
 _MULT_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
 _STANDALONE_INTEGER_RE = re.compile(r"(?<![\w.+-])[0-9]+(?!\w|\.[0-9])")
 _INTEGER_RE = re.compile(r"[0-9]+")
+_THOUSANDS_RE = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+")
 
 
 def parse_product(text):
     """Parse the multiplicative product from the model output.
 
     Prefer the first \\boxed{...}; fall back to the last complete integer.
-    Returns None if nothing parses to an integer.
+    Returns None if nothing parses to an integer. Unlike misc/{multiplication,lcm}_benchmark.py,
+    well-formed thousands separators are accepted (\\boxed{5,312,856} -> 5312856); other commas
+    (\\boxed{1,2}, \\boxed{5,31,2856}) still fail.
     """
 
     # Only consider text after the thinking trace
@@ -250,6 +253,8 @@ def parse_product(text):
             return None
         inside = integers[-1]
 
+    if _THOUSANDS_RE.fullmatch(inside):
+        inside = inside.replace(",", "")
     if not _INTEGER_RE.fullmatch(inside):
         return None
     try:

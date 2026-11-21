@@ -77,11 +77,16 @@ OUTPUTS = [  # (label, model output, expected parsed value)
     ("product instead of lcm", "\\boxed{216}", 216),
     ("no box: last integer", "The LCM of 12 and 18 is 36", 36),
     ("two boxes: first wins", "\\boxed{36} or \\boxed{72}", 36),
-    ("commas inside box", "\\boxed{1,234}", None),
+    ("thousands separators", "\\boxed{1,234}", 1234),   # benchmark parse_lcm: None
+    ("bad comma grouping", "\\boxed{1,2}", None),
     ("non-integer in box", "\\boxed{36.0}", None),
     ("empty", "", None),
     ("truncated mid-box", "so the answer is \\boxed{3", 3),
 ]
+
+
+# labels where parse_product intentionally differs from misc/lcm_benchmark.parse_lcm
+DIVERGES = {"thousands separators"}
 
 
 def test_solver_parsing():
@@ -91,7 +96,8 @@ def test_solver_parsing():
     for label, out, want in OUTPUTS:
         got, ok = parse_product(out), LCM.verify(out, P)
         row(label, out, got, ok)
-        assert got == want == parse_lcm(out), "parser must match misc/lcm_benchmark.parse_lcm"
+        assert got == want
+        assert (got == parse_lcm(out)) != (label in DIVERGES), "only DIVERGES may differ from parse_lcm"
         assert ok == (want == 36) == LCM.check(out, gold)
 
 
