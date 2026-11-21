@@ -16,7 +16,7 @@
 #
 # Usage (from the repo root):
 #   sbatch -A <account> -p <partition> slurm_scripts/train/sgs_onpolicy_grpo.sbatch
-# Env overrides: MODEL NUM_ITERS (5) MINI_BATCH_SIZE (32) K (8) RESP_LEN (4096) OUT_ROOT (files/runs)
+# Env overrides: TASK_NAME (sorting | multiplication | lcm | lcm_wo_coprime | preorder) MODEL NUM_ITERS (5) MINI_BATCH_SIZE (32) K (8) RESP_LEN (4096) OUT_ROOT (files/runs)
 # Extra CLI flags pass through to sgs.sgs_onpolicy_grpo (e.g. --all-targets).
 
 set -euo pipefail
@@ -29,8 +29,25 @@ export OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false RAY_DEDUP_LOGS=0
 export RAY_TMPDIR="/tmp/ray_${SLURM_JOB_ID:-local}"
 mkdir -p "${RAY_TMPDIR}"
 
-CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
-FILES=(sorting_1000_L8-128.jsonl sorting_1000_L8-16-128.jsonl sorting_1000_L8-16-32-128.jsonl sorting_1000.jsonl)
+TASK_NAME="${TASK_NAME:-sorting}"   # sorting | multiplication | lcm | lcm_wo_coprime | preorder (sgs/tasks.py)
+case "${TASK_NAME}" in
+    sorting)
+        CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
+        FILES=(sorting_1000_L8-128.jsonl sorting_1000_L8-16-128.jsonl sorting_1000_L8-16-32-128.jsonl sorting_1000.jsonl) ;;
+    multiplication)
+        CONFIGS=(L2-10 L2-4-10 L2-4-6-10 all)
+        FILES=(multiplication_1000_L2-10.jsonl multiplication_1000_L2-4-10.jsonl multiplication_1000_L2-4-6-10.jsonl multiplication_1000.jsonl) ;;
+    lcm)
+        CONFIGS=(L2-32 L2-4-32 L2-4-8-32 all)
+        FILES=(lcm_1000_L2-32.jsonl lcm_1000_L2-4-32.jsonl lcm_1000_L2-4-8-32.jsonl lcm_1000.jsonl) ;;
+    lcm_wo_coprime)   # LCM with GCD > 1 pairs only (data/lcm_wo_coprime/); same prompts/verifier as lcm
+        CONFIGS=(L2-32 L2-4-32 L2-4-8-32 all)
+        FILES=(lcm_wo_coprime_1000_L2-32.jsonl lcm_wo_coprime_1000_L2-4-32.jsonl lcm_wo_coprime_1000_L2-4-8-32.jsonl lcm_wo_coprime_1000.jsonl) ;;
+    preorder)
+        CONFIGS=(L8-128 L8-16-128 L8-16-32-128 all)
+        FILES=(preorder_1000_L8-128.jsonl preorder_1000_L8-16-128.jsonl preorder_1000_L8-16-32-128.jsonl preorder_1000.jsonl) ;;
+    *) echo "unknown TASK_NAME=${TASK_NAME}" >&2; exit 1 ;;
+esac
 TASK="${SLURM_ARRAY_TASK_ID:-0}"
 
 MODEL="${MODEL:-Qwen/Qwen3-4B}"
@@ -38,11 +55,11 @@ NUM_ITERS="${NUM_ITERS:-5}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
 K="${K:-8}"
 RESP_LEN="${RESP_LEN:-4096}"
-DATASET="data/sorting/${FILES[$TASK]}"
-VAL_DATASET="data/sorting/sorting_val_100.jsonl"
+DATASET="data/${TASK_NAME}/${FILES[$TASK]}"
+VAL_DATASET="data/${TASK_NAME}/${TASK_NAME}_val_100.jsonl"
 OUT_ROOT="${OUT_ROOT:-files/runs}"
 M="${MODEL##*/}"
-RUN_NAME="sgs-onpolicy-grpo-${M,,}-sorting-${CONFIGS[$TASK]}-${NUM_ITERS}iters-mbs${MINI_BATCH_SIZE}-k${K}-optim-reset"
+RUN_NAME="sgs-onpolicy-grpo-${M,,}-${TASK_NAME}-${CONFIGS[$TASK]}-${NUM_ITERS}iters-mbs${MINI_BATCH_SIZE}-k${K}-optim-reset"
 # -j<array job>_<task> suffix lets eval jobs find this run from TRAIN_JOB=<array job>_<task>.
 OUT_DIR="${OUT_ROOT}/${RUN_NAME}-$(date +%Y%m%d-%H%M%S)-j${SLURM_ARRAY_JOB_ID:-local}_${TASK}"
 mkdir -p "${OUT_DIR}"
@@ -50,6 +67,7 @@ echo "host: $(hostname)  run: ${RUN_NAME}  out: ${OUT_DIR}  data: ${DATASET}"
 nvidia-smi -L
 
 "${PYTHON}" -m sgs.sgs_onpolicy_grpo \
+    --task "${TASK_NAME}" \
     --dataset "${DATASET}" \
     --val-dataset "${VAL_DATASET}" \
     --model "${MODEL}" \

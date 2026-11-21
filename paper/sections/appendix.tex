@@ -66,3 +66,94 @@ learning signal.
     \ENDFOR
   \end{algorithmic}
 \end{algorithm}
+
+\paragraph{Alternative solve-rate rewards.}
+SGS rewards a synthetic problem through $\Rsolve$, which is nonzero only when
+$s(\xt) > 0$ and $s(\xt)$ is in the bottom $70\%$ of the batch. We also run the
+majority-vote variant with two percentile-free choices of $\Rsolve$, both
+maximized at $s(\xt) = 0.5$ and zero at $s(\xt) \in \{0, 1\}$:
+\begin{equation}
+  \Rsolve^{\mathrm{learn}}(\xt) = s(\xt)\,\big(1 - s(\xt)\big),
+  \qquad
+  \Rsolve^{\mathrm{R\text{-}Zero}}(\xt) = 1 - 2\,\big|s(\xt) - \tfrac{1}{2}\big|,
+  \label{eq:rsolve-variants}
+\end{equation}
+the learnability reward and the uncertainty reward of R-Zero~\citep{huang2026rzero}.
+As before, $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$ and $s(\xt)$ is computed
+with $\tilde{v}$ (\cref{eq:mv-reward}). \Cref{alg:sgs-grpo-mv-learn,alg:sgs-grpo-mv-rzero}
+differ from \cref{alg:sgs-grpo-mv} only in the $\Rsolve$ line. Both rewards
+are also $0$ whenever $\tau = 1$.
+
+\begin{algorithm}[tb]
+  \caption{SGS-GRPO with majority-vote rewards and learnability $\Rsolve$ (on-policy Solver update)}
+  \label{alg:sgs-grpo-mv-learn}
+  \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} Dataset $\D$, Solver $\solver$, Conjecturer $\conj$, Guide $\guide$, mini-batch size $M$, agreement threshold $\tau$
+    \STATE Initialize all problems in $\D$ as unsolved
+    \FOR{iteration $t = 1, 2, \ldots$}
+      \STATE Sample batch $\B \subseteq \D$
+      \STATE Split $\B$ into $\Bsolved$, $\Bunsolved$
+      \STATE $\mathcal{C} \leftarrow \B$ if all targets, else $\Bunsolved$
+      \FOR{each $x \in \mathcal{C}$}
+        \STATE Generate $\xt \sim \conj(\cdot \mid x)$
+      \ENDFOR
+      \STATE Collect synthetic set $\Bsynth$
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE Sample $k$ solutions from $\solver$ (before the Solver update)
+        \STATE Score them with $\tilde{v}$ (\cref{eq:mv-mode,eq:mv-reward})
+        \STATE $s(\xt) \leftarrow \frac{1}{k}\sum_{i=1}^{k} \tilde{v}(y_i)$
+        \STATE $\Rsolve \leftarrow s(\xt)\,(1 - s(\xt))$ (\cref{eq:rsolve-variants})
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
+      \STATE Reset optimizer states of $\solver$, $\conj$ (if optimizer reset)
+      \FOR{each mini-batch $\B_m$ of $M$ problems of shuffled $\B \cup \Bsynth$}
+        \STATE $\theta_{\mathrm{old}} \leftarrow \theta$
+        \FOR{each problem $x \in \B_m$}
+          \STATE Sample $k$ solutions from $\solverold$
+          \STATE Score them with $v$ if $x \in \B$, else with $\tilde{v}$ (\cref{eq:mv-reward})
+          \STATE Compute $\Ahat_i$ (\cref{eq:grpo-adv})
+        \ENDFOR
+        \STATE Update Solver $\solver$ with one gradient step on $\Lgrpo(\theta; \B_m)$ (\cref{eq:grpo})
+      \ENDFOR
+      \STATE Mark each $x \in \B$ with $s(x) > 0$ as solved
+      \STATE Update Conjecturer $\conj$ with RL using $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[tb]
+  \caption{SGS-GRPO with majority-vote rewards and R-Zero $\Rsolve$ (on-policy Solver update)}
+  \label{alg:sgs-grpo-mv-rzero}
+  \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} Dataset $\D$, Solver $\solver$, Conjecturer $\conj$, Guide $\guide$, mini-batch size $M$, agreement threshold $\tau$
+    \STATE Initialize all problems in $\D$ as unsolved
+    \FOR{iteration $t = 1, 2, \ldots$}
+      \STATE Sample batch $\B \subseteq \D$
+      \STATE Split $\B$ into $\Bsolved$, $\Bunsolved$
+      \STATE $\mathcal{C} \leftarrow \B$ if all targets, else $\Bunsolved$
+      \FOR{each $x \in \mathcal{C}$}
+        \STATE Generate $\xt \sim \conj(\cdot \mid x)$
+      \ENDFOR
+      \STATE Collect synthetic set $\Bsynth$
+      \FOR{each $\xt \in \Bsynth$}
+        \STATE Sample $k$ solutions from $\solver$ (before the Solver update)
+        \STATE Score them with $\tilde{v}$ (\cref{eq:mv-mode,eq:mv-reward})
+        \STATE $s(\xt) \leftarrow \frac{1}{k}\sum_{i=1}^{k} \tilde{v}(y_i)$
+        \STATE $\Rsolve \leftarrow 1 - 2\,|s(\xt) - \tfrac{1}{2}|$ (\cref{eq:rsolve-variants})
+        \STATE $\Rguide \leftarrow \guide(x, \xt)$
+      \ENDFOR
+      \STATE Reset optimizer states of $\solver$, $\conj$ (if optimizer reset)
+      \FOR{each mini-batch $\B_m$ of $M$ problems of shuffled $\B \cup \Bsynth$}
+        \STATE $\theta_{\mathrm{old}} \leftarrow \theta$
+        \FOR{each problem $x \in \B_m$}
+          \STATE Sample $k$ solutions from $\solverold$
+          \STATE Score them with $v$ if $x \in \B$, else with $\tilde{v}$ (\cref{eq:mv-reward})
+          \STATE Compute $\Ahat_i$ (\cref{eq:grpo-adv})
+        \ENDFOR
+        \STATE Update Solver $\solver$ with one gradient step on $\Lgrpo(\theta; \B_m)$ (\cref{eq:grpo})
+      \ENDFOR
+      \STATE Mark each $x \in \B$ with $s(x) > 0$ as solved
+      \STATE Update Conjecturer $\conj$ with RL using $\Rsynth = \minmax(\Rsolve \cdot \Rguide)$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}

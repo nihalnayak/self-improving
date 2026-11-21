@@ -1,4 +1,4 @@
-"""Solver-only baselines for SGS on sorting: verl's own PPO trainer with
+"""Solver-only baselines for SGS (sorting, multiplication, lcm or preorder, --task): verl's own PPO trainer with
 adv_estimator=grpo (GRPO, default) or reinforce_plus_plus (REINFORCE++).
 
 Only the Solver is trained, on the same targets, prompt and verifier as
@@ -7,12 +7,12 @@ advantages, KL loss, validation, wandb/console logging, checkpoints) is verl's
 `main_ppo` path, as in https://verl.readthedocs.io/en/latest/start/quickstart.html.
 
     jsonl -> out_dir/data/train.parquet   one row per target, also used as val
-    reward = compute_score below          1 if parse_sorted(answer) == sorted(list)
-    --val-dataset jsonl -> data/val.parquet  held-out targets (data_source val_sort_len_{L})
+    reward = compute_score below          1 if the task verifier accepts (sgs/tasks.py)
+    --val-dataset jsonl -> data/val.parquet  held-out targets (data_source val_<sort|mult|lcm|preorder>_len_{L})
     eval/pass@5/{len_L,all}               exact pass@5 on the targets, as in sgs_simple
     val/pass@5/{len_L,all}                exact pass@5 on the val targets
     eval_samples/{step}.jsonl             every val generation (verl validation_data_dir)
-    val-core/sort_len_{L}/acc/...         verl's own val metrics: mean@5 ~ pass@1; best@5 is a
+    val-core/<sort|mult|lcm|preorder>_len_{L}/acc/...         verl's own val metrics: mean@5 ~ pass@1; best@5 is a
                                           bootstrap (with replacement) estimate, biased low
 
 Notes:
@@ -37,13 +37,17 @@ from pathlib import Path
 import numpy as np
 import ray
 
-from sgs.common import (PatchedActorRolloutRefWorker, load_targets, parse_sorted,
-                        ray_runtime_env, solver_messages)
+from sgs.common import PatchedActorRolloutRefWorker, ray_runtime_env
+from sgs.tasks import TASK_BY_SOURCE, TASKS
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="GRPO / REINFORCE++ baseline on sorting with verl")
-    ap.add_argument("--dataset", required=True, help="jsonl with a `list` field per row")
+    ap = argparse.ArgumentParser(description="GRPO / REINFORCE++ Solver baseline with verl")
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting",
+                    help="prompts, verifier and data format (sgs/tasks.py)")
+    ap.add_argument("--dataset", required=True,
+                    help="jsonl of targets (sorting: `list`; multiplication, lcm: `number1`, `number2`; "
+                         "preorder: `inorder`, `postorder`)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--n-gpus", type=int, default=4)
@@ -78,20 +82,23 @@ def parse_args(argv=None):
     return ap.parse_known_args(argv)
 
 
-def write_parquet(targets, path, source_prefix=""):
-    """verl RL dataset: chat prompt, per-length data_source, sorted list as ground truth."""
+def write_parquet(targets, path, task, source_prefix=""):
+    """verl RL dataset: chat prompt, data_source {prefix}{task.source}_len_{level}
+    (e.g. sort_len_8, val_mult_len_4), task.answer as ground truth."""
     from datasets import Dataset
-    rows = [{"prompt": solver_messages(xs),
-             "data_source": f"{source_prefix}sort_len_{len(xs)}",
-             "reward_model": {"style": "rule", "ground_truth": sorted(xs)},
+    rows = [{"prompt": task.solver_messages(xs),
+             "data_source": f"{source_prefix}{task.source}_len_{task.level(xs)}",
+             "reward_model": {"style": "rule", "ground_truth": task.answer(xs)},
              "extra_info": {"index": i}}
             for i, xs in enumerate(targets)]
     Dataset.from_list(rows).to_parquet(str(path))
 
 
 def compute_score(data_source, solution_str, ground_truth, extra_info=None, **kwargs):
-    """verl custom reward: binary sort verifier (same as sgs_simple)."""
-    return float(parse_sorted(solution_str) == [int(x) for x in ground_truth])
+    """verl custom reward: the task's binary verifier (same as sgs_simple). The task is
+    recovered from data_source, the only task info verl passes here."""
+    source = data_source.removeprefix("val_").rsplit("_len_", 1)[0]
+    return float(TASK_BY_SOURCE[source].check(solution_str, ground_truth))
 
 
 def build_config(args, data_path, val_paths, hydra_overrides):
@@ -202,14 +209,15 @@ def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict
         passed[uid] |= bool(a > 0.5)
         src[uid] = ds
     n = self.config.actor_rollout_ref.rollout.val_kwargs.n
-    # data_source is sort_len_{L} (train targets -> eval/) or val_sort_len_{L} (-> val/)
-    for prefix, split in (("", "eval"), ("val_", "val")):
-        uids = [u for u, s in src.items() if s.startswith(f"{prefix}sort_len_")]
+    # data_source is <task>_len_{L} (train targets -> eval/) or val_<task>_len_{L} (-> val/)
+    level = {u: int(s.rsplit("_", 1)[-1]) for u, s in src.items()}
+    for is_val, split in ((False, "eval"), (True, "val")):
+        uids = [u for u, s in src.items() if s.startswith("val_") == is_val]
         if not uids:
             continue
-        for L in sorted({int(src[u].split("_")[-1]) for u in uids}):
+        for L in sorted({level[u] for u in uids}):
             m[f"{split}/pass@{n}/len_{L}"] = float(np.mean(
-                [passed[u] for u in uids if src[u] == f"{prefix}sort_len_{L}"]))
+                [passed[u] for u in uids if level[u] == L]))
         m[f"{split}/pass@{n}/all"] = float(np.mean([passed[u] for u in uids]))
     return m
 
@@ -236,20 +244,21 @@ def main():
     out_dir = Path(args.out_dir)
     (out_dir / "data").mkdir(parents=True, exist_ok=True)
 
-    targets = load_targets(args.dataset)
+    task = TASKS[args.task]
+    targets = task.load(args.dataset)
     if args.eval_every is None:
         # verl's train dataloader drops the last partial batch
         args.eval_every = max(1, len(targets) // args.train_batch_size)
     (out_dir / "args.json").write_text(json.dumps(
         {**vars(args), "hydra_overrides": hydra_overrides}, indent=2))
     data_path = (out_dir / "data" / "train.parquet").resolve()
-    write_parquet(targets, data_path)
+    write_parquet(targets, data_path, task)
     print(f"[data] {len(targets)} targets from {args.dataset} -> {data_path}", flush=True)
     val_paths = [data_path]
     if args.val_dataset:
-        val_targets = load_targets(args.val_dataset)
+        val_targets = task.load(args.val_dataset)
         val_paths.append((out_dir / "data" / "val.parquet").resolve())
-        write_parquet(val_targets, val_paths[-1], source_prefix="val_")
+        write_parquet(val_targets, val_paths[-1], task, source_prefix="val_")
         print(f"[data] {len(val_targets)} val targets from {args.val_dataset} -> {val_paths[-1]}",
               flush=True)
 

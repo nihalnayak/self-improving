@@ -14,7 +14,8 @@ Sorting mode (--sort-results-dir): reads `<dir>/<label>/**/<split>_samples.jsonl
 from `sgs.eval_sort` (n samples per list with per-sample `correct`), computes
 the unbiased pass@k for k = 1..n per list length, and writes
 `<dir>/pass_at_k_<split>.pdf` (and `.png` with --save-png): one panel per list
-length plus "all", one line per label.
+length plus "all", one line per label. --task (sorting default, multiplication, lcm,
+preorder) sets the level used for the panels (list length / operand digits / nodes).
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
+
+from sgs.tasks import TASKS  # noqa: E402
 
 
 FONT_SIZE = 22
@@ -193,7 +196,7 @@ def build_plot(
     print(f"[plot] wrote {output_path}", flush=True)
 
 
-def load_sort_pass_at_k(results_dir: Path) -> pd.DataFrame:
+def load_sort_pass_at_k(results_dir: Path, task: str = "sorting") -> pd.DataFrame:
     """Long table: label, split, length (str, incl. "all"), k, pass (unbiased pass@k)."""
     rows = []
     # OPSD's teacher sees the gold sorted list: not a fair comparison, so not plotted.
@@ -205,7 +208,7 @@ def load_sort_pass_at_k(results_dir: Path) -> pd.DataFrame:
                 continue
             df = pd.read_json(files[-1], lines=True)  # last checkpoint if several
             n = len(df["correct"].iloc[0])
-            df["length"] = df["list"].map(len)
+            df["length"] = df["list"].map(TASKS[task].level)
             for k in range(1, n + 1):
                 df["pk"] = df["correct"].map(lambda oks: 1 - comb(n - sum(oks), k) / comb(n, k))
                 for length, g in [*df.groupby("length"), ("all", df)]:
@@ -256,13 +259,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=None,
                         help="output path; default <results-root>/<model-short>/pass_at_k.pdf")
     parser.add_argument("--save-png", action="store_true")
+    parser.add_argument("--task", choices=sorted(TASKS), default="sorting",
+                        help="sorting mode: level of each problem (sgs/tasks.py)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     if args.sort_results_dir is not None:
-        df = load_sort_pass_at_k(args.sort_results_dir)
+        df = load_sort_pass_at_k(args.sort_results_dir, args.task)
         if df.empty:
             print(f"[plot] no *_samples.jsonl under {args.sort_results_dir}", flush=True)
             return

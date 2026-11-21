@@ -1,4 +1,4 @@
-"""Solver pass@n on sorting datasets for any number of checkpoints, via vLLM.
+"""Solver pass@n on sorting (or --task multiplication / lcm / preorder) datasets for any number of checkpoints, via vLLM.
 
 Same prompt, verifier and sampling as the in-training evals of sgs_simple and
 solver_simple (sgs/common.py; 5 samples at T=1), so the numbers line up with
@@ -9,15 +9,21 @@ their `eval/pass@5/*` (train) and `val/pass@5/*` (val) curves.
                       run out_dir    (every ckpt/iter_*/solver/huggingface   [sgs_simple]
                                       and ckpt/global_step_*/actor/huggingface [solver_simple])
                       HF hub id      (e.g. Qwen/Qwen3-1.7B, the base model)
-    --datasets      split=jsonl pairs (default: train + val sorting sets)
+    --datasets      split=jsonl pairs (default: the task's train + val sets)
+    --task          sorting (default) | multiplication | lcm | preorder: prompt, verifier
+                    and level (list length / operand digits / nodes) from sgs/tasks.py
 
 Outputs (under --out-dir):
     summary.jsonl                   one row per (checkpoint, split): {split}/pass@n/{len_L,all}
-    <label>/<split>_samples.jsonl   every completion with its parsed answer and correctness
+                                    (L = task level)
+    <label>/<split>_samples.jsonl   every completion with its parsed answer and correctness;
+                                    `list` is the problem, `level` its task level
 
 Usage:
     python -m sgs.eval_sort --checkpoints Qwen/Qwen3-1.7B /n/netscratch/.../runs/<run>
     python -m sgs.eval_sort --checkpoints <run> --datasets val=files/data/sorting/sorting_val_100.jsonl
+    python -m sgs.eval_sort --task lcm --checkpoints Qwen/Qwen3-4B \
+        --datasets train=data/lcm/lcm_1000_L2-32.jsonl val=data/lcm/lcm_val_100.jsonl
 """
 
 import argparse
@@ -32,16 +38,31 @@ import torch
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from sgs.common import load_targets, parse_sorted, solver_messages
+from sgs.tasks import TASKS, parse_preorder, parse_product, parse_sorted
+
+# default train + val sets per task
+DATASETS = {
+    "sorting": ["train=files/data/sorting/sorting_1000.jsonl", "val=files/data/sorting/sorting_val_100.jsonl"],
+    "multiplication": ["train=data/multiplication/multiplication_1000.jsonl",
+                       "val=data/multiplication/multiplication_val_100.jsonl"],
+    "lcm": ["train=data/lcm/lcm_1000.jsonl", "val=data/lcm/lcm_val_100.jsonl"],
+    "lcm_wo_coprime": ["train=data/lcm_wo_coprime/lcm_wo_coprime_1000.jsonl",
+                       "val=data/lcm_wo_coprime/lcm_wo_coprime_val_100.jsonl"],
+    "preorder": ["train=data/preorder/preorder_1000.jsonl", "val=data/preorder/preorder_val_100.jsonl"],
+}
+# parsed answer stored per sample (correctness comes from task.verify)
+PARSE = {"sorting": parse_sorted, "multiplication": parse_product, "lcm": parse_product,
+         "lcm_wo_coprime": parse_product,
+         "preorder": parse_preorder}
 
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--checkpoints", nargs="+", required=True)
-    ap.add_argument("--datasets", nargs="+",
-                    default=["train=files/data/sorting/sorting_1000.jsonl",
-                             "val=files/data/sorting/sorting_val_100.jsonl"],
-                    help="split=path.jsonl")
+    ap.add_argument("--task", choices=sorted(TASKS), default="sorting",
+                    help="prompts, verifier and data format (sgs/tasks.py)")
+    ap.add_argument("--datasets", nargs="+", default=None,
+                    help="split=path.jsonl (default: the task's train + val sets)")
     ap.add_argument("--out-dir", default="files/results/sgs/eval_sort")
     ap.add_argument("--n", type=int, default=5, help="samples per target (pass@n)")
     ap.add_argument("--temperature", type=float, default=1.0)
@@ -52,7 +73,9 @@ def parse_args(argv=None):
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--last-only", action="store_true", help="run dirs: only the last saved step")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    args.datasets = args.datasets or DATASETS[args.task]
+    return args
 
 
 def expand_checkpoints(specs, last_only=False):
@@ -76,8 +99,9 @@ def expand_checkpoints(specs, last_only=False):
 
 
 def evaluate(llm, tok, targets, args):
-    """pass@n per list length and overall + per-sample rows."""
-    prompts = [tok.apply_chat_template(solver_messages(xs), tokenize=False, add_generation_prompt=True,
+    """pass@n per task level (sorting: list length) and overall + per-sample rows."""
+    task = TASKS[args.task]
+    prompts = [tok.apply_chat_template(task.solver_messages(xs), tokenize=False, add_generation_prompt=True,
                                        enable_thinking=args.thinking) for xs in targets]
     sp = SamplingParams(n=args.n, temperature=args.temperature, top_p=args.top_p,
                         max_tokens=args.max_tokens, seed=args.seed)
@@ -85,11 +109,12 @@ def evaluate(llm, tok, targets, args):
     rows, passed = [], []
     for xs, req in zip(targets, outs):
         texts = [o.text for o in req.outputs]
-        parsed = [parse_sorted(t) for t in texts]
-        oks = [p == sorted(xs) for p in parsed]
+        parsed = [PARSE[args.task](t) for t in texts]
+        oks = [task.verify(t, xs) for t in texts]
         passed.append(any(oks))
-        rows.append({"list": xs, "completions": texts, "parsed": parsed, "correct": oks})
-    passed, lens = np.array(passed), np.array([len(x) for x in targets])
+        rows.append({"list": xs, "level": task.level(xs), "completions": texts, "parsed": parsed,
+                     "correct": oks})
+    passed, lens = np.array(passed), np.array([task.level(x) for x in targets])
     m = {f"pass@{args.n}/len_{L}": float(passed[lens == L].mean()) for L in sorted(set(lens.tolist()))}
     m[f"pass@{args.n}/all"] = float(passed.mean())
     return m, rows
@@ -99,7 +124,7 @@ def main():
     args = parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    splits = {s: load_targets(p) for s, p in (d.split("=", 1) for d in args.datasets)}
+    splits = {s: TASKS[args.task].load(p) for s, p in (d.split("=", 1) for d in args.datasets)}
     ckpts = expand_checkpoints(args.checkpoints, args.last_only)
     print(f"[eval] {len(ckpts)} checkpoints x splits {[(s, len(t)) for s, t in splits.items()]}", flush=True)
 

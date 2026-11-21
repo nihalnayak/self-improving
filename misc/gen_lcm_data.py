@@ -46,6 +46,9 @@ def main() -> None:
     p.add_argument("--n", type=int, default=None,
                    help="total samples split evenly across lengths "
                         "(remainder to the last lengths); overrides --per-length")
+    p.add_argument("--exclude", type=Path, default=None,
+                   help="JSONL of pairs to skip (e.g. the val split); "
+                        "pairs are also unique within the output")
     args = p.parse_args()
 
     try:
@@ -62,14 +65,26 @@ def main() -> None:
     else:
         counts = [args.n // k + (i >= k - args.n % k) for i in range(k)]
     rng = random.Random(args.seed)
+    # unordered pairs already used: lcm(a, b) == lcm(b, a), so (a, b) and (b, a) collide
+    seen = set()
+    if args.exclude is not None:
+        for line in args.exclude.open():
+            r = json.loads(line)
+            seen.add(tuple(sorted((r["number1"], r["number2"]))))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with args.out.open("w") as f:
         for L, c in zip(lengths, counts):
             for _ in range(c):
-                sample = gen_sample(L, rng)
-                while args.exclude_coprime and math.gcd(sample["number1"], sample["number2"]) == 1:
+                while True:
                     sample = gen_sample(L, rng)
+                    key = tuple(sorted((sample["number1"], sample["number2"])))
+                    if key in seen:
+                        continue
+                    if args.exclude_coprime and math.gcd(*key) == 1:
+                        continue
+                    break
+                seen.add(key)
                 f.write(json.dumps(sample) + "\n")
                 n += 1
 
