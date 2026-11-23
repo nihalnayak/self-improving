@@ -7,6 +7,8 @@ reads the evals the training runs already wrote:
     GRPO: <run>/eval_samples/{step}.jsonl   verl val generations (5 per list, train + val
                                             targets); pass@5 = any correct, per length
 Optional grpo-1.5x-<config> and grpo-2x-<config> labels add scaled-data GRPO curves.
+--sgs-synth (off by default) adds grpo-sgs-synth-<config> (GRPO on SGS synthetic data), val
+only: its train set is synthetic, with arbitrary lengths. Outputs get a `_sgs_synth` suffix.
 Each GRPO run uses its own training dataset for train curves and its own steps per epoch.
 Base model pass@5 (dotted line) is the final-eval row of `base-<config>/summary.jsonl`.
 
@@ -27,6 +29,7 @@ Writes to --results-dir:
 Usage:
     python -m visualize.sort_curves --results-dir files/results/sgs/eval_sorting_qwen3-4b_5ep
     python -m visualize.sort_curves --results-dir files/results/sgs/eval_sorting_qwen3-4b_5ep --metric pass1
+    python -m visualize.sort_curves --results-dir files/results/sgs/eval_sorting_qwen3-4b_5ep --sgs-synth
     python -m visualize.sort_curves --task lcm --results-dir files/results/sgs/eval_lcm_qwen3-4b_5ep
 """
 
@@ -50,6 +53,7 @@ FONT_SIZE = 22
 _TAB10 = sns.color_palette("tab10", 10)
 METHODS = {"grpo": ("GRPO", _TAB10[1]), "sgs-onpolicy-grpo-reset": ("SGS-OnPolicy-GRPO", _TAB10[4]),
            "grpo-1.5x": ("GRPO (1.5×)", _TAB10[2]), "grpo-2x": ("GRPO (2×)", _TAB10[3])}
+SGS_SYNTH = {"grpo-sgs-synth": ("GRPO (SGS data)", _TAB10[5])}
 CONFIG_RE = re.compile(r"^grpo-(?:1\.5x-|2x-)?(L\d+(?:-\d+)*|all)$")
 
 
@@ -104,6 +108,8 @@ def grpo_rows(run, task, metric="pass5"):
             correct[content].append(r["acc"] > 0.5)
         by = defaultdict(list)
         for content, c in correct.items():
+            if content not in split_of:  # verl left-truncates prompts longer than prompt_length
+                continue
             # pass@5: any sample correct; pass@1: every sample counts
             by[split_of[content]] += c if metric == "pass1" else [any(c)]
         for (split, length), cs in by.items():
@@ -143,10 +149,12 @@ def main():
     ap.add_argument("--runs-root", type=Path, default=Path("/n/netscratch/dam_lab/Lab/nnayak1/sgs/runs"))
     ap.add_argument("--metric", choices=("pass5", "pass1"), default="pass5")
     ap.add_argument("--task", choices=sorted(TASKS), default="sorting")
+    ap.add_argument("--sgs-synth", action="store_true", help="add GRPO-on-SGS-data val curves")
     args = ap.parse_args()
     task = TASKS[args.task]
     level_one, level_many = task.level_name
-    suffix = "" if args.metric == "pass5" else f"_{args.metric}"
+    suffix = ("" if args.metric == "pass5" else f"_{args.metric}") + ("_sgs_synth" if args.sgs_synth else "")
+    methods = {**METHODS, **SGS_SYNTH} if args.sgs_synth else METHODS
     ylabel = "Pass@5" if args.metric == "pass5" else "Pass@1"
 
     labels = {p.name for p in args.results_dir.iterdir() if p.is_dir()}
@@ -157,19 +165,20 @@ def main():
 
     rows = []
     for config in configs:
-        for m, (name, _) in METHODS.items():
+        for m, (name, _) in methods.items():
             if f"{m}-{config}" not in labels:
                 continue
             run = run_dir(args.results_dir, f"{m}-{config}", args.runs_root)
             it = sgs_rows(run, task, args.metric) if m.startswith("sgs") else grpo_rows(run, task, args.metric)
-            rows += [{"config": config, "method": name, **r} for r in it]
+            rows += [{"config": config, "method": name, **r} for r in it
+                     if m != "grpo-sgs-synth" or r["split"] == "val"]
     df = pd.DataFrame(rows).sort_values(["split", "config", "method", "length", "epoch"])
     df.to_csv(args.results_dir / f"sort_curves{suffix}.csv", index=False)
 
     sns.set_theme(style="whitegrid", rc={"font.size": FONT_SIZE, "axes.titlesize": FONT_SIZE,
                                          "axes.labelsize": FONT_SIZE, "legend.fontsize": FONT_SIZE,
                                          "xtick.labelsize": FONT_SIZE - 4, "ytick.labelsize": FONT_SIZE - 4})
-    palette = {name: color for name, color in METHODS.values()}
+    palette = {name: color for name, color in methods.values()}
     lengths = sorted(set(df["length"]), key=int)
     epochs = range(int(df["epoch"].max()) + 1)
     for split in ("train", "val"):
@@ -202,7 +211,7 @@ def main():
                                 xycoords="axes fraction", rotation=90, ha="right", va="center", multialignment="center",
                                 fontsize=FONT_SIZE)
         handles = [plt.Line2D([], [], color=c, marker="o", markersize=10, lw=2.5, label=n)
-                   for n, c in METHODS.values() if n in set(df["method"])]
+                   for n, c in methods.values() if n in set(df["method"])]
         handles.append(plt.Line2D([], [], color="gray", ls=":", lw=2.5, label="Base"))
         fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
                    bbox_to_anchor=(0.5, 1.0))
