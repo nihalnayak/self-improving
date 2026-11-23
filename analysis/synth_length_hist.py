@@ -1,7 +1,8 @@
 """Histogram of list lengths in each sorting_sgs_onpolicy_5iters_synth train file.
 
-One subplot per file; lengths binned 2-10, 11-20, ..., 121-128. Lengths outside
-[2, 128] are dropped as outliers (title shows visualized/total).
+One subplot per file; one bar per length 1-128. The first 1000 rows of each file
+are the original train split (red, bottom), the rest are synthetic (blue, stacked
+on top). Lengths > 128 are dropped as outliers (title shows visualized/total).
 
 Usage:
     python -m analysis.synth_length_hist
@@ -18,11 +19,11 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
 
-EDGES = [2, 11, 21, 31, 41, 51, 61, 71, 81, 91, 101, 111, 121, 129]  # left-inclusive bin starts
+MAX_LEN = 128
+N_ORIG = 1000  # rows [:N_ORIG] are the original split, the rest are synthetic
 # file stem -> train lengths, in plot order (sorting_1000 is sort_curves.py's "all" config)
 TRAIN_LENGTHS = {"sorting_1000_L8-128": "8, 128", "sorting_1000_L8-16-128": "8, 16, 128",
                  "sorting_1000_L8-16-32-128": "8, 16, 32, 128", "sorting_1000": "8, 16, 32, 64, 128"}
-LABELS = ["2-10"] + [f"{a}-{a + 9}" for a in range(11, 121, 10)] + ["121-128"]
 
 
 def main():
@@ -34,17 +35,26 @@ def main():
 
     sns.set_theme(style="whitegrid")
     files = [args.data_dir / f"{n}.jsonl" for n in TRAIN_LENGTHS]
+    edges = np.arange(1, MAX_LEN + 2)
+    xs = edges[:-1]
     fig, axes = plt.subplots(1, len(files), figsize=(5 * len(files), 4), sharey=True)
     for ax, f in zip(axes, files):
         lens = np.array([len(json.loads(line)["list"]) for line in open(f)])
-        kept = lens[(lens >= EDGES[0]) & (lens < EDGES[-1])]
-        counts, _ = np.histogram(kept, bins=EDGES)
-        sns.barplot(x=LABELS, y=counts, ax=ax, color="C0")
-        ax.set_title(f"Train Lengths\n{TRAIN_LENGTHS[f.stem]}\n{len(kept)}/{len(lens)} shown ({len(lens) - len(kept)} outliers removed)",
+        orig, synth = lens[:N_ORIG], lens[N_ORIG:]
+        n_kept = (lens <= MAX_LEN).sum()
+        orig_counts, _ = np.histogram(orig, bins=edges)
+        synth_counts, _ = np.histogram(synth, bins=edges)
+        ax.bar(xs, orig_counts, width=1.0, color="tab:red", label="original")
+        ax.bar(xs, synth_counts, width=1.0, bottom=orig_counts, color="C0", label="synthetic")
+        ax.set_title(f"Train Lengths\n{TRAIN_LENGTHS[f.stem]}\n{n_kept}/{len(lens)} shown ({len(lens) - n_kept} outliers removed)",
                      fontsize=10)
+        ax.set_xlim(0.5, MAX_LEN + 0.5)
+        ax.set_xticks(range(8, MAX_LEN + 1, 8))
         ax.set_xlabel("list length")
         ax.tick_params(axis="x", rotation=60)
-    axes[0].set_ylabel("count")
+    axes[0].set_yscale("log")
+    axes[0].set_ylabel("count (log)")
+    axes[0].legend()
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(args.out_dir / f"synth_length_hist.{ext}", dpi=300, bbox_inches="tight")
