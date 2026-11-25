@@ -9,6 +9,7 @@ data/
     sorting_1000_L8-128.jsonl        train, lengths 8, 128  (config "L8-128")
     sorting_1000_L8-16-128.jsonl     train, lengths 8, 16, 128
     sorting_1000_L8-16-32-128.jsonl  train, lengths 8, 16, 32, 128
+    sorting_1000_step8.jsonl         train, lengths 8, 16, 24, ..., 128
     sorting_val_100.jsonl            validation, all lengths
   multiplication/
     multiplication_1000.jsonl              train, all digit counts
@@ -76,6 +77,7 @@ Return only the sorted list on a single line, enclosed in \boxed{}, e.g. \boxed{
 | `sorting_1000_L8-128.jsonl` | 1000 | 8, 128 (500) | train config `L8-128` (task 0) |
 | `sorting_1000_L8-16-128.jsonl` | 1000 | 8, 16 (333), 128 (334) | train config `L8-16-128` (task 1) |
 | `sorting_1000_L8-16-32-128.jsonl` | 1000 | 8, 16, 32, 128 (250) | train config `L8-16-32-128` (task 2) |
+| `sorting_1000_step8.jsonl` | 1000 | 8, 16, ..., 64 (63), 72, 80, ..., 128 (62) | finer-length train set (step 8) |
 | `sorting_val_100.jsonl` | 100 | 8, 16, 32, 64, 128 (20) | held-out validation for every run |
 
 The `sorting_1500*.jsonl` and `sorting_2000*.jsonl` files repeat these four
@@ -102,6 +104,8 @@ python misc/gen_sort_data.py --out data/sorting/sorting_1000.jsonl
 python misc/gen_sort_data.py --n 1000 --lengths 8,128        --out data/sorting/sorting_1000_L8-128.jsonl
 python misc/gen_sort_data.py --n 1000 --lengths 8,16,128     --out data/sorting/sorting_1000_L8-16-128.jsonl
 python misc/gen_sort_data.py --n 1000 --lengths 8,16,32,128  --out data/sorting/sorting_1000_L8-16-32-128.jsonl
+# descending order so the remainder (+1) lands on the lowest lengths
+python misc/gen_sort_data.py --n 1000 --lengths 128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8 --out data/sorting/sorting_1000_step8.jsonl
 python misc/gen_sort_data.py --per-length 20 --seed 1        --out data/sorting/sorting_val_100.jsonl
 ```
 
