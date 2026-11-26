@@ -40,8 +40,11 @@ def verify(texts, problems, k, task=Sorting):
                      for j in range(len(texts))])
 
 
-def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, rng):
-    """Run one on-policy SGS-GRPO iteration in place on `solved`. Returns (metrics, samples)."""
+def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, rng, solver_step=None):
+    """Run one on-policy SGS-GRPO iteration in place on `solved`. Returns (metrics, samples).
+
+    solver_step (--max-solver-steps, from GRPORunner): called after each optimizer step;
+    True = Solver budget spent, so skip the remaining chunks (the Conjecturer still updates)."""
     m, timing = {}, {}
     task = TASKS[args.task]
 
@@ -87,13 +90,15 @@ def sgs_onpolicy_grpo_iteration(t, args, targets, solved, solver, conj, guide, r
         lens.append(ln)
         clips.append(cl)
         examples.append({"problem": chunk_problems[0], "completion": texts[0], "correct": bool(v[0])})
+        if solver_step is not None and solver_step(t):
+            break
     for pos, i in enumerate(ids):
         if trained[pos]:
             solved[i] = solved[i] or bool(rates[pos] > 0)
     keys = {key for cm in chunk_metrics for key in cm}
     m.update({key: float(np.mean([cm[key] for cm in chunk_metrics if key in cm])) for key in keys})
     m["solver/n_opt_steps"] = int(sum(cm["solver/n_opt_steps"] for cm in chunk_metrics))
-    m["solver/n_chunks"] = len(chunks)
+    m["solver/n_chunks"] = len(chunk_metrics)   # < len(chunks) if the step budget ran out
     m["solver/n_dropped_problems"] = int(len(problems) - trained.sum())
     m["solver/n_train_rollouts"] = int(trained.sum()) * k
     m["solver/n_train_correct"] = n_correct

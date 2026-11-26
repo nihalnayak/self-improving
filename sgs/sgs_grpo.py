@@ -108,6 +108,12 @@ def parse_args(argv=None):
     ap.add_argument("--save-every", type=int, default=5, help="0 = only at the end")
     ap.add_argument("--eval-every", type=int, default=1,
                     help="per-length pass@5 on targets every N iters (and at iter 0); 0 = off")
+    ap.add_argument("--max-solver-steps", type=int, default=0,
+                    help="stop after this many Solver optimizer steps (chunks) in total, mid-"
+                         "iteration if needed; that iteration's Conjecturer update still runs. "
+                         "sgs_onpolicy_grpo only; 0 = off (run --iters iterations)")
+    ap.add_argument("--eval-every-steps", type=int, default=0,
+                    help="with --max-solver-steps: eval every N Solver steps (and at step 0)")
     ap.add_argument("--val-dataset", default=None,
                     help="jsonl of held-out targets; pass@5 on it at each eval")
     ap.add_argument("--seed", type=int, default=0)
@@ -371,33 +377,54 @@ class GRPORunner:
                        dir=str(out_dir))
             print(f"[wandb] {wandb.run.url}", flush=True)
 
-        def run_eval(t):
+        def run_eval(t, step=None):
+            """step = cumulative Solver steps (--max-solver-steps mode), else None."""
             ev, rows = evaluate(t, targets, solver, task=task)
             if val_targets:
                 val_ev, val_rows = evaluate(t, val_targets, solver, prefix="val", task=task)
                 ev.update(val_ev)
                 rows += val_rows
-            with open(out_dir / "eval_samples" / f"iter_{t:04d}.jsonl", "w") as f:
+            name = f"iter_{t:04d}" if step is None else f"step_{step:04d}"
+            with open(out_dir / "eval_samples" / f"{name}.jsonl", "w") as f:
                 f.writelines(json.dumps(r) + "\n" for r in rows)
-            print(f"[eval {t}] " + " ".join(f"{k}={v:.4g}" for k, v in ev.items()), flush=True)
+            print(f"[eval {name}] " + " ".join(f"{k}={v:.4g}" for k, v in ev.items()), flush=True)
             with open(out_dir / "eval_pass5.jsonl", "a") as f:
-                f.write(json.dumps({"iter": t, **ev}) + "\n")
+                f.write(json.dumps({"iter": t, **({} if step is None else {"step": step}), **ev}) + "\n")
             return ev
 
-        if args.eval_every:
-            ev = run_eval(0)
+        # --max-solver-steps: count Solver optimizer steps across iterations; the iteration
+        # calls solver_step(t) after each one, which evals every --eval-every-steps and
+        # returns True once the budget is spent. wandb is then keyed by Solver step.
+        steps_mode = args.max_solver_steps > 0
+        done = 0
+
+        def solver_step(t):
+            nonlocal done
+            done += 1
+            if args.eval_every_steps and done % args.eval_every_steps == 0:
+                ev = run_eval(t, done)
+                if wandb is not None:   # commit=False: the iteration's row may share this step
+                    wandb.log(ev, step=done, commit=False)
+            return done >= args.max_solver_steps
+
+        if args.eval_every or (steps_mode and args.eval_every_steps):
+            ev = run_eval(0, 0 if steps_mode else None)
             if wandb is not None:
                 wandb.log(ev, step=0, commit=True)
 
+        hook = {"solver_step": solver_step} if steps_mode else {}
         pbar = tqdm(total=args.iters, desc="Training Progress")
         for t in range(1, args.iters + 1):
             t0 = time.time()
-            metrics, samples = iteration(t, args, targets, solved, solver, conj, guide, rng)
+            metrics, samples = iteration(t, args, targets, solved, solver, conj, guide, rng, **hook)
+            last = t == args.iters or (steps_mode and done >= args.max_solver_steps)
+            if steps_mode:
+                metrics["solver/total_steps"] = done
             timing = {}
             if args.eval_every and t % args.eval_every == 0:
                 with simple_timer("eval", timing):
                     metrics.update(run_eval(t))
-            if (args.save_every and t % args.save_every == 0) or t == args.iters:
+            if (args.save_every and t % args.save_every == 0) or last:
                 with simple_timer("save", timing):
                     for tag in ("solver", "conj"):
                         policies[tag].save(out_dir / "ckpt" / f"iter_{t:04d}" / tag, t)
@@ -416,11 +443,13 @@ class GRPORunner:
             with open(out_dir / "samples" / f"iter_{t:04d}.json", "w") as f:
                 json.dump(samples, f, indent=1)
             if wandb is not None:
-                wandb.log(metrics, step=t, commit=True)
+                wandb.log(metrics, step=done if steps_mode else t, commit=True)
             pbar.set_postfix(solve_rate=f"{metrics['cumulative_solve_rate']:.3f}",
                              n_train=metrics["solver/n_train_rollouts"],
                              iter_sec=f"{metrics['time/iter_sec']:.0f}")
             pbar.update(1)
+            if last:
+                break
         pbar.close()
 
         if wandb is not None:
