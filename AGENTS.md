@@ -79,6 +79,15 @@ If `env.sh` exists at the repo root, it defines this project's base setup
 on the node or inside a new sbatch. Don't copy module/env lines from older
 scripts; some are outdated. If a version changes, edit `env.sh`.
 
+## 7. Experiment Log (`EXPERIMENTS.md`)
+
+Keep `EXPERIMENTS.md` high-level. Match the style of the entries already there.
+
+- "Current / upcoming": one line per experiment, in the form `- [ ] what, task/config, model (Owner) — short status`
+  (e.g. `— queued`, `— 2/3 done+evaluated`). Tick `[x]` when done; delete when stale.
+- No job IDs, paths, timestamps or flag lists. Those belong in `jobs_*.tsv` / slurm logs.
+- Results go in the high-level summary: Task / Setup / Baselines / Results, plus a plot.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
