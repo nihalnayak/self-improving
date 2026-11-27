@@ -12,7 +12,8 @@ only: its train set is synthetic, with arbitrary lengths. Outputs get a `_sgs_sy
 Each GRPO run uses its own training dataset for train curves and its own steps per epoch.
 Base model pass@5 (dotted line) is the final-eval row of `base-<config>/summary.jsonl`.
 --steps: x = Solver optimizer step instead of epoch, for step-matched runs (SGS run with
---max-solver-steps --eval-every-steps); adds sgs-onpolicy-grpo-<config> (no optimizer reset).
+--max-solver-steps --eval-every-steps); adds sgs-onpolicy-grpo-<config> (no optimizer reset) and
+sgs-onpolicy-grpo-prefilter-<config> (sgs.sgs_onpolicy_grpo_prefilter).
 Outputs get a `_steps` suffix.
 
 --task (sorting default, multiplication, lcm, preorder) sets the level (list length /
@@ -58,7 +59,8 @@ _TAB10 = sns.color_palette("tab10", 10)
 METHODS = {"grpo": ("GRPO", _TAB10[1]), "sgs-onpolicy-grpo-reset": ("SGS-OnPolicy-GRPO", _TAB10[4]),
            "grpo-1.5x": ("GRPO (1.5×)", _TAB10[2]), "grpo-2x": ("GRPO (2×)", _TAB10[3])}
 SGS_SYNTH = {"grpo-sgs-synth": ("GRPO (SGS data)", _TAB10[5])}
-STEPS = {"sgs-onpolicy-grpo": ("SGS-OnPolicy-GRPO (no reset)", _TAB10[6])}
+STEPS = {"sgs-onpolicy-grpo": ("SGS-OnPolicy-GRPO (no reset)", _TAB10[6]),
+         "sgs-onpolicy-grpo-prefilter": ("SGS-OnPolicy-GRPO (pre-filter)", _TAB10[7])}
 CONFIG_RE = re.compile(r"^grpo-(?:1\.5x-|2x-)?(L\d+(?:-\d+)*|all)$")
 
 
